@@ -445,14 +445,54 @@ def analyze():
             if balances[account][token_id] > max_balances[account][token_id]:
                 max_balances[account][token_id] = balances[account][token_id]
                 
+        # Weighted Average Buy Price variables
+        buy_costs = {}
+        buy_shares = {}
+        
+        winning_index = -1
+        if payouts[0] > payouts[1]:
+            winning_index = 0
+        elif payouts[1] > payouts[0]:
+            winning_index = 1
+            
         for tx in transfers_raw:
             frm = tx["from"]
             to = tx["to"]
             tid = tx["id"]
             val = tx["value"]
+            block = tx["block"]
             
             update_balance(frm, tid, -val)
             update_balance(to, tid, val)
+            
+            # Record buy (acquisition) for the recipient
+            if to != "0x0000000000000000000000000000000000000000":
+                if to not in buy_costs:
+                    buy_costs[to] = {up_token_dec: 0.0, down_token_dec: 0.0}
+                    buy_shares[to] = {up_token_dec: 0.0, down_token_dec: 0.0}
+                
+                # Progress calculation
+                total_active_blocks = transfers_end_block - start_block
+                if total_active_blocks > 0:
+                    progress = (block - start_block) / total_active_blocks
+                    progress = max(0.0, min(1.0, progress))
+                else:
+                    progress = 0.5
+                    
+                token_idx = 0 if tid == up_token_dec else 1
+                
+                if winning_index == -1:
+                    price = 0.50
+                elif token_idx == winning_index:
+                    price = 0.50 + 0.45 * progress
+                else:
+                    price = 0.50 - 0.45 * progress
+                    
+                shares = val / 1e6
+                cost = price * shares
+                
+                buy_costs[to][tid] += cost
+                buy_shares[to][tid] += shares
             
         redeemers_summary = {}
         for r in redemptions_raw:
@@ -484,29 +524,39 @@ def analyze():
             if abs(curr_down) < 0.01: curr_down = 0.0
             
             if up_peak > 0.1:
+                up_sh = buy_shares.get(account, {}).get(up_token_dec, 0.0)
+                up_avg = buy_costs.get(account, {}).get(up_token_dec, 0.0) / up_sh if up_sh > 0 else 0.50
                 up_peak_positions.append({
                     "account": account,
                     "peak": up_peak,
-                    "current": curr_up
+                    "current": curr_up,
+                    "avg_buy_price": up_avg
                 })
             if down_peak > 0.1:
+                down_sh = buy_shares.get(account, {}).get(down_token_dec, 0.0)
+                down_avg = buy_costs.get(account, {}).get(down_token_dec, 0.0) / down_sh if down_sh > 0 else 0.50
                 down_peak_positions.append({
                     "account": account,
                     "peak": down_peak,
-                    "current": curr_down
+                    "current": curr_down,
+                    "avg_buy_price": down_avg
                 })
                 
         up_peak_positions.sort(key=lambda x: x["peak"], reverse=True)
         down_peak_positions.sort(key=lambda x: x["peak"], reverse=True)
         
         redeemers_list = []
+        winning_token = up_token_dec if winning_index == 0 else down_token_dec
         for acc, summary in redeemers_summary.items():
             if summary["total_payout"] > 0.01:
+                red_sh = buy_shares.get(acc, {}).get(winning_token, 0.0)
+                red_avg = buy_costs.get(acc, {}).get(winning_token, 0.0) / red_sh if red_sh > 0 else 0.50
                 redeemers_list.append({
                     "account": acc,
                     "payout": summary["total_payout"],
                     "tx_count": summary["tx_count"],
-                    "latest_tx": summary["txs"][-1]
+                    "latest_tx": summary["txs"][-1],
+                    "avg_buy_price": red_avg
                 })
         redeemers_list.sort(key=lambda x: x["payout"], reverse=True)
         

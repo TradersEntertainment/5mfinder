@@ -57,7 +57,7 @@
         
         /* Container */
         .app-container {
-            max-width: 1200px;
+            max-width: 1450px;
             margin: 0 auto;
             padding: 2.5rem 1.5rem;
         }
@@ -517,22 +517,22 @@
             border-collapse: collapse;
             text-align: left;
             font-family: 'Inter', sans-serif;
-            font-size: 0.95rem;
+            font-size: 0.9rem;
         }
         
         th {
             background: rgba(255, 255, 255, 0.02);
             color: var(--text-secondary);
             font-weight: 600;
-            padding: 1.1rem 1.5rem;
+            padding: 0.8rem 0.8rem;
             border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-            font-size: 0.85rem;
+            font-size: 0.78rem;
             text-transform: uppercase;
             letter-spacing: 0.05em;
         }
         
         td {
-            padding: 1.1rem 1.5rem;
+            padding: 0.8rem 0.8rem;
             border-bottom: 1px solid rgba(255, 255, 255, 0.04);
             color: var(--text-primary);
             vertical-align: middle;
@@ -548,6 +548,77 @@
         
         tr:last-child td {
             border-bottom: none;
+        }
+
+        /* Unified Dashboard Grid CSS */
+        .dashboard-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 1.5rem;
+            margin-top: 1.5rem;
+            width: 100%;
+        }
+        
+        .glass-card-sub {
+            background: rgba(255, 255, 255, 0.015);
+            border: 1px solid rgba(255, 255, 255, 0.04);
+            border-radius: 18px;
+            padding: 1.5rem;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+            transition: all 0.3s ease;
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+        
+        .glass-card-sub:hover {
+            border-color: rgba(255, 255, 255, 0.08);
+            background: rgba(255, 255, 255, 0.025);
+            transform: translateY(-2px);
+        }
+        
+        .column-header {
+            font-family: 'Outfit', sans-serif;
+            font-size: 1.2rem;
+            font-weight: 700;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+            padding-bottom: 0.8rem;
+        }
+        
+        .column-header i {
+            font-size: 1.1rem;
+        }
+        
+        .text-success {
+            color: var(--success);
+        }
+        
+        .text-danger {
+            color: var(--danger);
+        }
+        
+        /* Average price badge styling */
+        .avg-price-badge {
+            background: rgba(255, 234, 0, 0.08);
+            border: 1px solid rgba(255, 234, 0, 0.2);
+            color: var(--warning);
+            padding: 0.3rem 0.6rem;
+            border-radius: 6px;
+            font-weight: 700;
+            font-size: 0.85rem;
+            font-family: monospace;
+            display: inline-flex;
+            align-items: center;
+        }
+
+        @media (max-width: 1200px) {
+            .dashboard-grid {
+                grid-template-columns: 1fr;
+            }
         }
         
         /* Address styling */
@@ -830,69 +901,78 @@
                     </div>
                 </div>
                 
-                <!-- Tabs Area -->
-                <div class="tabs-container">
-                    <button class="tab-btn active" onclick="switchTab('tabRedeemers')">Redeemers & Kazananlar</button>
-                    <button class="tab-btn" onclick="switchTab('tabUpPositions')">UP Hissesi Holderları</button>
-                    <button class="tab-btn" onclick="switchTab('tabDownPositions')">DOWN Hissesi Holderları</button>
-                </div>
-                
-                <!-- Tab Contents: Redeemers -->
-                <div id="tabRedeemers" class="tab-content active">
-                    <div class="table-responsive">
-                        <table>
-                            <thead>
-                                <tr>
-                                    <th style="width: 80px;">Sıra</th>
-                                    <th>Cüzdan Adresi (Account)</th>
-                                    <th>Toplam İtfa Payout (USDC)</th>
-                                    <th>Redeem İşlem Sayısı</th>
-                                    <th>Son İşlem Hash</th>
-                                </tr>
-                            </thead>
-                            <tbody id="redeemersTableBody">
-                                <!-- Dynamic rows -->
-                            </tbody>
-                        </table>
+                <!-- Unified 3-Column Dashboard Grid -->
+                <div class="dashboard-grid">
+                    
+                    <!-- Column 1: Redeemers & Kazananlar -->
+                    <div class="glass-card-sub">
+                        <div class="column-header">
+                            <i class="fa-solid fa-trophy" style="color: #ffd700;"></i> Redeemers & Kazananlar
+                        </div>
+                        <div class="table-responsive">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th style="width: 45px;">Sıra</th>
+                                        <th>Cüzdan Adresi</th>
+                                        <th>Alış Ort.</th>
+                                        <th>İtfa Payout</th>
+                                        <th>İşlem</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="redeemersTableBody">
+                                    <!-- Dynamic rows -->
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
-                </div>
-                
-                <!-- Tab Contents: UP positions -->
-                <div id="tabUpPositions" class="tab-content">
-                    <div class="table-responsive">
-                        <table>
-                            <thead>
-                                <tr>
-                                    <th style="width: 80px;">Sıra</th>
-                                    <th>Cüzdan Adresi (Account)</th>
-                                    <th>Zirve Pozisyon Boyutu (Shares)</th>
-                                    <th>Mevcut Kalan Hisseler (Shares)</th>
-                                </tr>
-                            </thead>
-                            <tbody id="upPositionsTableBody">
-                                <!-- Dynamic rows -->
-                            </tbody>
-                        </table>
+                    
+                    <!-- Column 2: UP Hissesi Holderları -->
+                    <div class="glass-card-sub">
+                        <div class="column-header">
+                            <i class="fa-solid fa-circle-chevron-up text-success"></i> UP Hissesi Holderları
+                        </div>
+                        <div class="table-responsive">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th style="width: 45px;">Sıra</th>
+                                        <th>Cüzdan Adresi</th>
+                                        <th>Alış Ort.</th>
+                                        <th>Zirve</th>
+                                        <th>Kalan</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="upPositionsTableBody">
+                                    <!-- Dynamic rows -->
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
-                </div>
-                
-                <!-- Tab Contents: DOWN positions -->
-                <div id="tabDownPositions" class="tab-content">
-                    <div class="table-responsive">
-                        <table>
-                            <thead>
-                                <tr>
-                                    <th style="width: 80px;">Sıra</th>
-                                    <th>Cüzdan Adresi (Account)</th>
-                                    <th>Zirve Pozisyon Boyutu (Shares)</th>
-                                    <th>Mevcut Kalan Hisseler (Shares)</th>
-                                </tr>
-                            </thead>
-                            <tbody id="downPositionsTableBody">
-                                <!-- Dynamic rows -->
-                            </tbody>
-                        </table>
+                    
+                    <!-- Column 3: DOWN Hissesi Holderları -->
+                    <div class="glass-card-sub">
+                        <div class="column-header">
+                            <i class="fa-solid fa-circle-chevron-down text-danger"></i> DOWN Hissesi Holderları
+                        </div>
+                        <div class="table-responsive">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th style="width: 45px;">Sıra</th>
+                                        <th>Cüzdan Adresi</th>
+                                        <th>Alış Ort.</th>
+                                        <th>Zirve</th>
+                                        <th>Kalan</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="downPositionsTableBody">
+                                    <!-- Dynamic rows -->
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
+                    
                 </div>
                 
             </section>
@@ -902,21 +982,6 @@
     </div>
 
     <script>
-        // Tab switching logic
-        function switchTab(tabId) {
-            // Deactivate all tabs
-            document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
-            document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
-            
-            // Find sender button based on switchTab target
-            const tabButtons = document.querySelectorAll('.tab-btn');
-            if (tabId === 'tabRedeemers') tabButtons[0].classList.add('active');
-            else if (tabId === 'tabUpPositions') tabButtons[1].classList.add('active');
-            else if (tabId === 'tabDownPositions') tabButtons[2].classList.add('active');
-            
-            // Activate selected tab content
-            document.getElementById(tabId).classList.add('active');
-        }
         
         // Helper to format currency
         function formatUSD(value) {
@@ -1066,18 +1131,13 @@
                             <td><div class="rank-badge">${idx + 1}</div></td>
                             <td>
                                 <div class="address-col">
-                                    <a href="https://polygonscan.com/address/${r.account}" target="_blank" class="address-link">${shortAddress(r.account)}</a>
+                                    <a href="https://polymarket.com/profile/${r.account}" target="_blank" class="address-link" title="Polymarket Profilini Görüntüle">${shortAddress(r.account)}</a>
                                     <button class="copy-btn" onclick="copyText('${r.account}', this)"><i class="fa-regular fa-copy"></i></button>
                                 </div>
                             </td>
-                            <td><span class="payout-badge"><i class="fa-solid fa-circle-dollar-to-slot"></i> ${r.payout.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDC</span></td>
-                            <td style="font-weight: 600;">${r.tx_count} işlem</td>
-                            <td>
-                                <div class="address-col">
-                                    <a href="https://polygonscan.com/tx/${r.latest_tx}" target="_blank" class="address-link">${shortAddress(r.latest_tx)}</a>
-                                    <button class="copy-btn" onclick="copyText('${r.latest_tx}', this)"><i class="fa-regular fa-copy"></i></button>
-                                </div>
-                            </td>
+                            <td><span class="avg-price-badge">$${r.avg_buy_price.toFixed(2)}</span></td>
+                            <td><span class="payout-badge">${r.payout.toLocaleString('tr-TR', { maximumFractionDigits: 0 })} USDC</span></td>
+                            <td style="font-weight: 600; font-size: 0.85rem;">${r.tx_count} işlem</td>
                         `;
                         redeemersBody.appendChild(tr);
                     });
@@ -1087,7 +1147,7 @@
                 const upBody = document.getElementById('upPositionsTableBody');
                 upBody.innerHTML = '';
                 if (data.top_up.length === 0) {
-                    upBody.innerHTML = `<tr><td colspan="4"><div class="empty-state"><i class="fa-solid fa-circle-question"></i><br>Hissedar kaydı bulunamadı.</div></td></tr>`;
+                    upBody.innerHTML = `<tr><td colspan="5"><div class="empty-state"><i class="fa-solid fa-circle-question"></i><br>Hissedar kaydı bulunamadı.</div></td></tr>`;
                 } else {
                     data.top_up.forEach((p, idx) => {
                         const tr = document.createElement('tr');
@@ -1095,12 +1155,13 @@
                             <td><div class="rank-badge">${idx + 1}</div></td>
                             <td>
                                 <div class="address-col">
-                                    <a href="https://polygonscan.com/address/${p.account}" target="_blank" class="address-link">${shortAddress(p.account)}</a>
+                                    <a href="https://polymarket.com/profile/${p.account}" target="_blank" class="address-link" title="Polymarket Profilini Görüntüle">${shortAddress(p.account)}</a>
                                     <button class="copy-btn" onclick="copyText('${p.account}', this)"><i class="fa-regular fa-copy"></i></button>
                                 </div>
                             </td>
-                            <td><span class="shares-badge peak">${p.peak.toLocaleString('tr-TR', { maximumFractionDigits: 2 })} adet</span></td>
-                            <td><span class="shares-badge">${p.current.toLocaleString('tr-TR', { maximumFractionDigits: 2 })} adet</span></td>
+                            <td><span class="avg-price-badge">$${p.avg_buy_price.toFixed(2)}</span></td>
+                            <td><span class="shares-badge peak">${p.peak.toLocaleString('tr-TR', { maximumFractionDigits: 0 })}</span></td>
+                            <td><span class="shares-badge">${p.current.toLocaleString('tr-TR', { maximumFractionDigits: 0 })}</span></td>
                         `;
                         upBody.appendChild(tr);
                     });
@@ -1110,7 +1171,7 @@
                 const downBody = document.getElementById('downPositionsTableBody');
                 downBody.innerHTML = '';
                 if (data.top_down.length === 0) {
-                    downBody.innerHTML = `<tr><td colspan="4"><div class="empty-state"><i class="fa-solid fa-circle-question"></i><br>Hissedar kaydı bulunamadı.</div></td></tr>`;
+                    downBody.innerHTML = `<tr><td colspan="5"><div class="empty-state"><i class="fa-solid fa-circle-question"></i><br>Hissedar kaydı bulunamadı.</div></td></tr>`;
                 } else {
                     data.top_down.forEach((p, idx) => {
                         const tr = document.createElement('tr');
@@ -1118,12 +1179,13 @@
                             <td><div class="rank-badge">${idx + 1}</div></td>
                             <td>
                                 <div class="address-col">
-                                    <a href="https://polygonscan.com/address/${p.account}" target="_blank" class="address-link">${shortAddress(p.account)}</a>
+                                    <a href="https://polymarket.com/profile/${p.account}" target="_blank" class="address-link" title="Polymarket Profilini Görüntüle">${shortAddress(p.account)}</a>
                                     <button class="copy-btn" onclick="copyText('${p.account}', this)"><i class="fa-regular fa-copy"></i></button>
                                 </div>
                             </td>
-                            <td><span class="shares-badge peak">${p.peak.toLocaleString('tr-TR', { maximumFractionDigits: 2 })} adet</span></td>
-                            <td><span class="shares-badge">${p.current.toLocaleString('tr-TR', { maximumFractionDigits: 2 })} adet</span></td>
+                            <td><span class="avg-price-badge">$${p.avg_buy_price.toFixed(2)}</span></td>
+                            <td><span class="shares-badge peak">${p.peak.toLocaleString('tr-TR', { maximumFractionDigits: 0 })}</span></td>
+                            <td><span class="shares-badge">${p.current.toLocaleString('tr-TR', { maximumFractionDigits: 0 })}</span></td>
                         `;
                         downBody.appendChild(tr);
                     });
