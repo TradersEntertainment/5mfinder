@@ -1,0 +1,1139 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>5mFinder - Polymarket Event Analyzer & Position Tracker</title>
+    
+    <!-- Google Fonts: Outfit & Inter -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    
+    <!-- FontAwesome for Premium Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <style>
+        :root {
+            --bg-main: #07080e;
+            --bg-glass: rgba(13, 16, 27, 0.65);
+            --border-glass: rgba(255, 255, 255, 0.07);
+            --text-primary: #f1f3f9;
+            --text-secondary: #8e95a5;
+            
+            --accent-cyan: #00f2fe;
+            --accent-purple: #9b51e0;
+            --accent-blue: #4facfe;
+            
+            --success: #00e676;
+            --danger: #ff1744;
+            --warning: #ffea00;
+        }
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+        
+        body {
+            background-color: var(--bg-main);
+            color: var(--text-primary);
+            font-family: 'Inter', sans-serif;
+            min-height: 100vh;
+            overflow-x: hidden;
+            background-image: 
+                radial-gradient(circle at 10% 20%, rgba(79, 172, 254, 0.08) 0%, transparent 40%),
+                radial-gradient(circle at 90% 80%, rgba(155, 81, 224, 0.08) 0%, transparent 40%);
+            background-attachment: fixed;
+        }
+        
+        h1, h2, h3, h4, h5, h6 {
+            font-family: 'Outfit', sans-serif;
+            letter-spacing: -0.02em;
+        }
+        
+        /* Container */
+        .app-container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2.5rem 1.5rem;
+        }
+        
+        /* Premium Header */
+        header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 3.5rem;
+            animation: fadeInDown 0.8s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        
+        .logo-section {
+            display: flex;
+            align-items: center;
+            gap: 0.8rem;
+        }
+        
+        .logo-icon {
+            background: linear-gradient(135deg, var(--accent-cyan), var(--accent-blue));
+            width: 42px;
+            height: 42px;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--bg-main);
+            font-size: 1.3rem;
+            font-weight: 800;
+            box-shadow: 0 0 20px rgba(0, 242, 254, 0.4);
+        }
+        
+        .logo-text {
+            font-size: 1.7rem;
+            font-weight: 800;
+            background: linear-gradient(to right, #ffffff, #b0c4de);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        
+        .network-tag {
+            background: rgba(130, 71, 229, 0.15);
+            border: 1px solid rgba(130, 71, 229, 0.3);
+            color: #a87ffb;
+            padding: 0.4rem 1rem;
+            border-radius: 30px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            box-shadow: 0 0 15px rgba(130, 71, 229, 0.1);
+        }
+        
+        .network-tag::before {
+            content: '';
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            background-color: #8247e5;
+            border-radius: 50%;
+            box-shadow: 0 0 8px #8247e5;
+        }
+        
+        /* Glass Card */
+        .glass-card {
+            background: var(--bg-glass);
+            border: 1px solid var(--border-glass);
+            border-radius: 24px;
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            padding: 2.5rem;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
+            transition: all 0.4s ease;
+        }
+        
+        /* Input Area Section */
+        .input-section {
+            text-align: center;
+            max-width: 750px;
+            margin: 0 auto 3rem auto;
+            animation: fadeInUp 0.8s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        
+        .input-section h2 {
+            font-size: 2.2rem;
+            font-weight: 700;
+            margin-bottom: 0.8rem;
+            background: linear-gradient(135deg, #ffffff 30%, #a5b4fc);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        
+        .input-section p {
+            color: var(--text-secondary);
+            font-size: 1.05rem;
+            margin-bottom: 2rem;
+        }
+        
+        .search-box {
+            position: relative;
+            display: flex;
+            gap: 0.8rem;
+            background: rgba(255, 255, 255, 0.03);
+            padding: 0.5rem;
+            border-radius: 18px;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            transition: all 0.3s ease;
+        }
+        
+        .search-box:focus-within {
+            border-color: rgba(0, 242, 254, 0.4);
+            box-shadow: 0 0 25px rgba(0, 242, 254, 0.15);
+            background: rgba(255, 255, 255, 0.05);
+        }
+        
+        .search-input {
+            flex: 1;
+            background: transparent;
+            border: none;
+            outline: none;
+            color: var(--text-primary);
+            font-size: 1.05rem;
+            padding: 0.8rem 1.2rem;
+            font-family: inherit;
+        }
+        
+        .search-input::placeholder {
+            color: rgba(255, 255, 255, 0.3);
+        }
+        
+        .search-btn {
+            background: linear-gradient(135deg, var(--accent-cyan), var(--accent-blue));
+            color: var(--bg-main);
+            border: none;
+            outline: none;
+            padding: 0.8rem 2rem;
+            border-radius: 14px;
+            font-weight: 700;
+            font-size: 1rem;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(0, 242, 254, 0.2);
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+        }
+        
+        .search-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(0, 242, 254, 0.35);
+            filter: brightness(1.05);
+        }
+        
+        .search-btn:active {
+            transform: translateY(0);
+        }
+        
+        /* Loading Premium Visualizer */
+        .loading-container {
+            display: none;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 3rem 0;
+            animation: fadeIn 0.4s ease;
+        }
+        
+        .pulse-loader {
+            width: 80px;
+            height: 80px;
+            border-radius: 50%;
+            background: transparent;
+            border: 4px solid rgba(0, 242, 254, 0.1);
+            border-top-color: var(--accent-cyan);
+            border-bottom-color: var(--accent-blue);
+            animation: spin 1.2s cubic-bezier(0.5, 0, 0.5, 1) infinite;
+            position: relative;
+            margin-bottom: 2rem;
+            box-shadow: 0 0 30px rgba(0, 242, 254, 0.1);
+        }
+        
+        .pulse-loader::after {
+            content: '';
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            right: 10px;
+            bottom: 10px;
+            border-radius: 50%;
+            border: 4px solid rgba(155, 81, 224, 0.1);
+            border-left-color: var(--accent-purple);
+            border-right-color: var(--accent-purple);
+            animation: spin-reverse 2s linear infinite;
+        }
+        
+        .loading-title {
+            font-size: 1.3rem;
+            font-weight: 600;
+            margin-bottom: 0.8rem;
+            background: linear-gradient(to right, #ffffff, #b0c4de);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        
+        .loading-steps {
+            max-width: 320px;
+            width: 100%;
+            display: flex;
+            flex-direction: column;
+            gap: 0.6rem;
+            margin-top: 0.5rem;
+        }
+        
+        .step-item {
+            display: flex;
+            align-items: center;
+            gap: 0.8rem;
+            font-size: 0.9rem;
+            color: var(--text-secondary);
+            transition: all 0.3s ease;
+        }
+        
+        .step-item.active {
+            color: var(--accent-cyan);
+            font-weight: 500;
+        }
+        
+        .step-item.completed {
+            color: var(--success);
+        }
+        
+        .step-icon {
+            font-size: 0.85rem;
+            width: 16px;
+            text-align: center;
+        }
+        
+        /* Dashboard Container */
+        .dashboard {
+            display: none;
+            flex-direction: column;
+            gap: 2rem;
+            animation: fadeInUp 0.8s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        
+        /* Status Banner */
+        .status-banner {
+            padding: 1.5rem 2rem;
+            border-radius: 18px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1.5rem;
+            border: 1px solid;
+        }
+        
+        .status-banner.resolved {
+            background: rgba(0, 230, 118, 0.08);
+            border-color: rgba(0, 230, 118, 0.2);
+            color: var(--success);
+        }
+        
+        .status-banner.active {
+            background: rgba(255, 23, 68, 0.08);
+            border-color: rgba(255, 23, 68, 0.2);
+            color: var(--danger);
+        }
+        
+        .status-left {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+        
+        .status-icon-badge {
+            width: 48px;
+            height: 48px;
+            border-radius: 14px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.4rem;
+        }
+        
+        .status-banner.resolved .status-icon-badge {
+            background: rgba(0, 230, 118, 0.15);
+            box-shadow: 0 0 15px rgba(0, 230, 118, 0.15);
+        }
+        
+        .status-banner.active .status-icon-badge {
+            background: rgba(255, 23, 68, 0.15);
+            box-shadow: 0 0 15px rgba(255, 23, 68, 0.15);
+        }
+        
+        .status-label {
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-secondary);
+            font-weight: 600;
+        }
+        
+        .status-value {
+            font-size: 1.4rem;
+            font-weight: 800;
+            color: var(--text-primary);
+        }
+        
+        .winning-pill {
+            background: linear-gradient(135deg, #00e676, #00b0ff);
+            color: var(--bg-main);
+            padding: 0.5rem 1.5rem;
+            border-radius: 30px;
+            font-weight: 800;
+            font-size: 1.1rem;
+            box-shadow: 0 0 20px rgba(0, 230, 118, 0.3);
+            text-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+        }
+        
+        /* Grid Stats */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 1.5rem;
+        }
+        
+        .stat-box {
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            border-radius: 18px;
+            padding: 1.5rem;
+            transition: all 0.3s ease;
+        }
+        
+        .stat-box:hover {
+            border-color: rgba(255, 255, 255, 0.1);
+            transform: translateY(-2px);
+            background: rgba(255, 255, 255, 0.03);
+        }
+        
+        .stat-label {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            margin-bottom: 0.5rem;
+            font-weight: 500;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        .stat-val {
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: var(--text-primary);
+        }
+        
+        .stat-val.cyan {
+            color: var(--accent-cyan);
+            text-shadow: 0 0 10px rgba(0, 242, 254, 0.15);
+        }
+        
+        .stat-val.purple {
+            color: #d69eff;
+        }
+        
+        /* Market Header Details */
+        .market-header-details {
+            display: flex;
+            flex-direction: column;
+            gap: 0.8rem;
+        }
+        
+        .market-header-details h3 {
+            font-size: 1.6rem;
+            font-weight: 700;
+            color: var(--text-primary);
+            line-height: 1.3;
+        }
+        
+        .market-desc {
+            font-size: 0.95rem;
+            color: var(--text-secondary);
+            line-height: 1.5;
+            background: rgba(255, 255, 255, 0.01);
+            border: 1px dashed rgba(255, 255, 255, 0.05);
+            border-radius: 12px;
+            padding: 1rem;
+            max-height: 120px;
+            overflow-y: auto;
+        }
+        
+        /* Tabs Premium Navigation */
+        .tabs-container {
+            display: flex;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+            gap: 1.5rem;
+            margin-top: 1rem;
+        }
+        
+        .tab-btn {
+            background: transparent;
+            border: none;
+            outline: none;
+            color: var(--text-secondary);
+            font-family: inherit;
+            font-size: 1.05rem;
+            font-weight: 600;
+            padding: 1rem 0.5rem 1.2rem 0.5rem;
+            cursor: pointer;
+            position: relative;
+            transition: all 0.3s ease;
+        }
+        
+        .tab-btn:hover {
+            color: var(--text-primary);
+        }
+        
+        .tab-btn.active {
+            color: var(--accent-cyan);
+        }
+        
+        .tab-btn.active::after {
+            content: '';
+            position: absolute;
+            bottom: -1px;
+            left: 0;
+            right: 0;
+            height: 3px;
+            background: linear-gradient(to right, var(--accent-cyan), var(--accent-blue));
+            border-radius: 10px;
+            box-shadow: 0 0 10px rgba(0, 242, 254, 0.4);
+        }
+        
+        /* Tab Contents */
+        .tab-content {
+            display: none;
+            animation: fadeIn 0.4s ease;
+        }
+        
+        .tab-content.active {
+            display: block;
+        }
+        
+        /* Tables Premium Design */
+        .table-responsive {
+            width: 100%;
+            overflow-x: auto;
+            border-radius: 16px;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            background: rgba(255, 255, 255, 0.01);
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            text-align: left;
+            font-family: 'Inter', sans-serif;
+            font-size: 0.95rem;
+        }
+        
+        th {
+            background: rgba(255, 255, 255, 0.02);
+            color: var(--text-secondary);
+            font-weight: 600;
+            padding: 1.1rem 1.5rem;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        
+        td {
+            padding: 1.1rem 1.5rem;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+            color: var(--text-primary);
+            vertical-align: middle;
+        }
+        
+        tr {
+            transition: all 0.2s ease;
+        }
+        
+        tr:hover td {
+            background: rgba(255, 255, 255, 0.02);
+        }
+        
+        tr:last-child td {
+            border-bottom: none;
+        }
+        
+        /* Address styling */
+        .address-col {
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+            font-family: monospace;
+            font-size: 0.95rem;
+            font-weight: 500;
+        }
+        
+        .address-link {
+            color: var(--accent-blue);
+            text-decoration: none;
+            transition: color 0.2s ease;
+        }
+        
+        .address-link:hover {
+            color: var(--accent-cyan);
+            text-decoration: underline;
+        }
+        
+        .copy-btn {
+            background: transparent;
+            border: none;
+            outline: none;
+            color: rgba(255, 255, 255, 0.25);
+            cursor: pointer;
+            transition: all 0.2s ease;
+            padding: 0.2rem;
+            border-radius: 4px;
+        }
+        
+        .copy-btn:hover {
+            color: var(--text-primary);
+            background: rgba(255, 255, 255, 0.08);
+        }
+        
+        .copy-btn:active {
+            transform: scale(0.9);
+        }
+        
+        /* Value Badges */
+        .payout-badge {
+            background: rgba(0, 230, 118, 0.1);
+            border: 1px solid rgba(0, 230, 118, 0.2);
+            color: var(--success);
+            padding: 0.4rem 0.9rem;
+            border-radius: 8px;
+            font-weight: 700;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+        }
+        
+        .shares-badge {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.07);
+            color: var(--text-primary);
+            padding: 0.4rem 0.9rem;
+            border-radius: 8px;
+            font-weight: 600;
+        }
+        
+        .shares-badge.peak {
+            background: rgba(0, 242, 254, 0.05);
+            border-color: rgba(0, 242, 254, 0.15);
+            color: var(--accent-cyan);
+            font-weight: 700;
+        }
+        
+        .rank-badge {
+            font-weight: 700;
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.05);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+        }
+        
+        tr:nth-child(1) .rank-badge {
+            background: rgba(255, 215, 0, 0.2);
+            color: #ffd700;
+            border: 1px solid rgba(255, 215, 0, 0.3);
+        }
+        tr:nth-child(2) .rank-badge {
+            background: rgba(192, 192, 192, 0.2);
+            color: #c0c0c0;
+            border: 1px solid rgba(192, 192, 192, 0.3);
+        }
+        tr:nth-child(3) .rank-badge {
+            background: rgba(205, 127, 50, 0.2);
+            color: #cd7f32;
+            border: 1px solid rgba(205, 127, 50, 0.3);
+        }
+        
+        /* Empty State */
+        .empty-state {
+            padding: 3rem;
+            text-align: center;
+            color: var(--text-secondary);
+        }
+        
+        .empty-state i {
+            font-size: 2.5rem;
+            color: rgba(255, 255, 255, 0.1);
+            margin-bottom: 1rem;
+        }
+        
+        /* Animations */
+        @keyframes spin {
+            100% { transform: rotate(360deg); }
+        }
+        @keyframes spin-reverse {
+            100% { transform: rotate(-360deg); }
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+        @keyframes fadeInUp {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        @keyframes fadeInDown {
+            from {
+                opacity: 0;
+                transform: translateY(-20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        
+        /* Custom scrollbars */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: rgba(255, 255, 255, 0.01);
+        }
+        ::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: rgba(255, 255, 255, 0.2);
+        }
+        
+        /* Responsive Grid fixes */
+        @media (max-width: 768px) {
+            .app-container {
+                padding: 1.5rem 1rem;
+            }
+            header {
+                flex-direction: column;
+                gap: 1rem;
+                align-items: flex-start;
+                margin-bottom: 2.5rem;
+            }
+            .search-box {
+                flex-direction: column;
+            }
+            .search-btn {
+                width: 100%;
+                justify-content: center;
+            }
+            .glass-card {
+                padding: 1.5rem;
+            }
+            .status-banner {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 1rem;
+            }
+            .winning-pill {
+                align-self: flex-start;
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <div class="app-container">
+        
+        <!-- Header -->
+        <header>
+            <div class="logo-section">
+                <div class="logo-icon">5</div>
+                <div class="logo-text">5mFinder</div>
+            </div>
+            <div class="network-tag">Polygon Network (USDC)</div>
+        </header>
+        
+        <!-- Main Form Glass Card -->
+        <main class="glass-card">
+            
+            <!-- Input Panel -->
+            <section class="input-section">
+                <h2>Polymarket Event Analyzer</h2>
+                <p>Bir Polymarket etkinlik linki veya slug yapıştırarak kazananları, itfa ödemelerini, geçmiş holderları ve ulaşılan zirve pozisyonları anında listeleyin.</p>
+                
+                <div class="search-box">
+                    <input type="text" id="marketUrl" class="search-input" placeholder="Örn: https://polymarket.com/event/btc-updown-5m-1780131600" autocomplete="off">
+                    <button id="btnAnalyze" class="search-btn">
+                        <i class="fa-solid fa-bolt"></i> Analiz Et
+                    </button>
+                </div>
+            </section>
+            
+            <!-- Loading visualizer -->
+            <section id="loadingState" class="loading-container">
+                <div class="pulse-loader"></div>
+                <div class="loading-title">Zincir Üstü Veriler Sorgulanıyor</div>
+                <p style="color: var(--text-secondary); margin-bottom: 1.5rem;">Bu işlem ağ yoğunluğuna bağlı olarak 15-20 saniye sürebilir...</p>
+                <div class="loading-steps">
+                    <div id="step-api" class="step-item"><i class="step-icon fa-solid fa-circle-notch fa-spin"></i> <span>Polymarket API sorgulanıyor...</span></div>
+                    <div id="step-block" class="step-item"><i class="step-icon fa-solid fa-circle"></i> <span>Ağ blok numaraları hesaplanıyor...</span></div>
+                    <div id="step-logs" class="step-item"><i class="step-icon fa-solid fa-circle"></i> <span>İşlem logları taranıyor...</span></div>
+                    <div id="step-aggregate" class="step-item"><i class="step-icon fa-solid fa-circle"></i> <span>Pozisyonlar ve itfalar derleniyor...</span></div>
+                </div>
+            </section>
+            
+            <!-- Dashboard Results -->
+            <section id="dashboard" class="dashboard">
+                
+                <!-- Market Header Details -->
+                <div class="market-header-details">
+                    <h3 id="marketTitle">-</h3>
+                    <div id="marketDesc" class="market-desc">-</div>
+                </div>
+                
+                <!-- Status Resolved Banner -->
+                <div id="statusBanner" class="status-banner">
+                    <div class="status-left">
+                        <div class="status-icon-badge">
+                            <i id="statusIcon" class="fa-solid fa-check-double"></i>
+                        </div>
+                        <div>
+                            <div class="status-label">Piyasa Durumu</div>
+                            <div id="statusText" class="status-value">-</div>
+                        </div>
+                    </div>
+                    <div id="winningOutcomeContainer" style="display: none;">
+                        <span class="status-label" style="display: block; margin-bottom: 0.3rem;">Kazanan Sonuç</span>
+                        <div id="winningOutcomeText" class="winning-pill">-</div>
+                    </div>
+                </div>
+                
+                <!-- Grid Stats Box -->
+                <div class="stats-grid">
+                    <div class="stat-box">
+                        <div class="stat-label"><i class="fa-solid fa-chart-simple"></i> Toplam Hacim</div>
+                        <div id="statVolume" class="stat-val cyan">$0</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label"><i class="fa-solid fa-droplet"></i> Likidite</div>
+                        <div id="statLiquidity" class="stat-val cyan">$0</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label"><i class="fa-solid fa-cubes"></i> Taranan Blok Aralığı</div>
+                        <div id="statBlocks" class="stat-val purple">0 blok</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label"><i class="fa-solid fa-user-group"></i> Benzersiz Redeemers</div>
+                        <div id="statRedeemers" class="stat-val purple">0 cüzdan</div>
+                    </div>
+                </div>
+                
+                <!-- Tabs Area -->
+                <div class="tabs-container">
+                    <button class="tab-btn active" onclick="switchTab('tabRedeemers')">Redeemers & Kazananlar</button>
+                    <button class="tab-btn" onclick="switchTab('tabUpPositions')">UP Hissesi Holderları</button>
+                    <button class="tab-btn" onclick="switchTab('tabDownPositions')">DOWN Hissesi Holderları</button>
+                </div>
+                
+                <!-- Tab Contents: Redeemers -->
+                <div id="tabRedeemers" class="tab-content active">
+                    <div class="table-responsive">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th style="width: 80px;">Sıra</th>
+                                    <th>Cüzdan Adresi (Account)</th>
+                                    <th>Toplam İtfa Payout (USDC)</th>
+                                    <th>Redeem İşlem Sayısı</th>
+                                    <th>Son İşlem Hash</th>
+                                </tr>
+                            </thead>
+                            <tbody id="redeemersTableBody">
+                                <!-- Dynamic rows -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                
+                <!-- Tab Contents: UP positions -->
+                <div id="tabUpPositions" class="tab-content">
+                    <div class="table-responsive">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th style="width: 80px;">Sıra</th>
+                                    <th>Cüzdan Adresi (Account)</th>
+                                    <th>Zirve Pozisyon Boyutu (Shares)</th>
+                                    <th>Mevcut Kalan Hisseler (Shares)</th>
+                                </tr>
+                            </thead>
+                            <tbody id="upPositionsTableBody">
+                                <!-- Dynamic rows -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                
+                <!-- Tab Contents: DOWN positions -->
+                <div id="tabDownPositions" class="tab-content">
+                    <div class="table-responsive">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th style="width: 80px;">Sıra</th>
+                                    <th>Cüzdan Adresi (Account)</th>
+                                    <th>Zirve Pozisyon Boyutu (Shares)</th>
+                                    <th>Mevcut Kalan Hisseler (Shares)</th>
+                                </tr>
+                            </thead>
+                            <tbody id="downPositionsTableBody">
+                                <!-- Dynamic rows -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                
+            </section>
+            
+        </main>
+        
+    </div>
+
+    <script>
+        // Tab switching logic
+        function switchTab(tabId) {
+            // Deactivate all tabs
+            document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+            
+            // Find sender button based on switchTab target
+            const tabButtons = document.querySelectorAll('.tab-btn');
+            if (tabId === 'tabRedeemers') tabButtons[0].classList.add('active');
+            else if (tabId === 'tabUpPositions') tabButtons[1].classList.add('active');
+            else if (tabId === 'tabDownPositions') tabButtons[2].classList.add('active');
+            
+            // Activate selected tab content
+            document.getElementById(tabId).classList.add('active');
+        }
+        
+        // Helper to format currency
+        function formatUSD(value) {
+            const num = parseFloat(value);
+            if (isNaN(num)) return '$0';
+            return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(num);
+        }
+        
+        // Helper to format address
+        function shortAddress(addr) {
+            if (!addr) return '';
+            return addr.slice(0, 6) + '...' + addr.slice(-4);
+        }
+        
+        // Helper to copy to clipboard
+        function copyText(text, btn) {
+            navigator.clipboard.writeText(text).then(() => {
+                const originalHTML = btn.innerHTML;
+                btn.innerHTML = '<i class="fa-solid fa-check" style="color: var(--success)"></i>';
+                setTimeout(() => {
+                    btn.innerHTML = originalHTML;
+                }, 1500);
+            });
+        }
+        
+        // Core Web Application Logic
+        document.getElementById('btnAnalyze').addEventListener('click', async () => {
+            const urlInput = document.getElementById('marketUrl').value.trim();
+            if (!urlInput) {
+                alert('Lütfen analiz için geçerli bir Polymarket linki veya slug girin.');
+                return;
+            }
+            
+            // Visual element pointers
+            const loadingState = document.getElementById('loadingState');
+            const dashboard = document.getElementById('dashboard');
+            
+            // Hide dashboard, reset loader visual states
+            dashboard.style.display = 'none';
+            loadingState.style.display = 'flex';
+            
+            const steps = {
+                api: document.getElementById('step-api'),
+                block: document.getElementById('step-block'),
+                logs: document.getElementById('step-logs'),
+                aggregate: document.getElementById('step-aggregate')
+            };
+            
+            // Helper to set visual state of loading checklist items
+            function setStepState(step, state) {
+                if (state === 'active') {
+                    step.className = 'step-item active';
+                    step.querySelector('i').className = 'step-icon fa-solid fa-circle-notch fa-spin';
+                } else if (state === 'completed') {
+                    step.className = 'step-item completed';
+                    step.querySelector('i').className = 'step-icon fa-solid fa-circle-check';
+                } else {
+                    step.className = 'step-item';
+                    step.querySelector('i').className = 'step-icon fa-solid fa-circle';
+                }
+            }
+            
+            // Visual progression simulation
+            setStepState(steps.api, 'active');
+            setStepState(steps.block, 'pending');
+            setStepState(steps.logs, 'pending');
+            setStepState(steps.aggregate, 'pending');
+            
+            setTimeout(() => {
+                if (loadingState.style.display === 'flex') {
+                    setStepState(steps.api, 'completed');
+                    setStepState(steps.block, 'active');
+                }
+            }, 2500);
+            
+            setTimeout(() => {
+                if (loadingState.style.display === 'flex') {
+                    setStepState(steps.block, 'completed');
+                    setStepState(steps.logs, 'active');
+                }
+            }, 5500);
+            
+            setTimeout(() => {
+                if (loadingState.style.display === 'flex') {
+                    setStepState(steps.logs, 'completed');
+                    setStepState(steps.aggregate, 'active');
+                }
+            }, 12500);
+            
+            try {
+                const response = await fetch('/api/analyze', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url: urlInput })
+                });
+                
+                const data = await response.json();
+                
+                if (!response.ok) {
+                    throw new Error(data.error || 'Ağ sorgusunda beklenmedik bir sorun oluştu.');
+                }
+                
+                // Hide loader and display dashboard
+                loadingState.style.display = 'none';
+                dashboard.style.display = 'flex';
+                
+                // --- UPDATE DASHBOARD CONTENT ---
+                const meta = data.metadata;
+                document.getElementById('marketTitle').innerText = meta.title;
+                document.getElementById('marketDesc').innerText = meta.description || 'Açıklama bulunmuyor.';
+                
+                // Set resolved status visual tag
+                const banner = document.getElementById('statusBanner');
+                const statusIcon = document.getElementById('statusIcon');
+                const statusText = document.getElementById('statusText');
+                const winningContainer = document.getElementById('winningOutcomeContainer');
+                const winningText = document.getElementById('winningOutcomeText');
+                
+                if (meta.isResolved) {
+                    banner.className = 'status-banner resolved';
+                    statusIcon.className = 'fa-solid fa-check-double';
+                    statusText.innerText = 'Çözümlendi (Resolved)';
+                    winningContainer.style.display = 'block';
+                    winningText.innerText = meta.winningOutcome;
+                } else {
+                    banner.className = 'status-banner active';
+                    statusIcon.className = 'fa-solid fa-circle-nodes';
+                    statusText.innerText = 'Aktif İşlem Görüyor';
+                    winningContainer.style.display = 'none';
+                }
+                
+                // Set Grid box numerical statistics
+                document.getElementById('statVolume').innerText = formatUSD(meta.volume);
+                document.getElementById('statLiquidity').innerText = formatUSD(meta.liquidity);
+                document.getElementById('statBlocks').innerText = meta.scannedBlocks.toLocaleString('tr-TR') + ' blok';
+                document.getElementById('statRedeemers').innerText = data.redeemers.length + ' cüzdan';
+                
+                // --- 1. Populate Redeemers Table ---
+                const redeemersBody = document.getElementById('redeemersTableBody');
+                redeemersBody.innerHTML = '';
+                if (data.redeemers.length === 0) {
+                    redeemersBody.innerHTML = `<tr><td colspan="5"><div class="empty-state"><i class="fa-solid fa-wallet"></i><br>Bu piyasada henüz itfa (redeem) işlemi yapılmamış.</div></td></tr>`;
+                } else {
+                    data.redeemers.forEach((r, idx) => {
+                        const tr = document.createElement('tr');
+                        tr.innerHTML = `
+                            <td><div class="rank-badge">${idx + 1}</div></td>
+                            <td>
+                                <div class="address-col">
+                                    <a href="https://polygonscan.com/address/${r.account}" target="_blank" class="address-link">${shortAddress(r.account)}</a>
+                                    <button class="copy-btn" onclick="copyText('${r.account}', this)"><i class="fa-regular fa-copy"></i></button>
+                                </div>
+                            </td>
+                            <td><span class="payout-badge"><i class="fa-solid fa-circle-dollar-to-slot"></i> ${r.payout.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDC</span></td>
+                            <td style="font-weight: 600;">${r.tx_count} işlem</td>
+                            <td>
+                                <div class="address-col">
+                                    <a href="https://polygonscan.com/tx/${r.latest_tx}" target="_blank" class="address-link">${shortAddress(r.latest_tx)}</a>
+                                    <button class="copy-btn" onclick="copyText('${r.latest_tx}', this)"><i class="fa-regular fa-copy"></i></button>
+                                </div>
+                            </td>
+                        `;
+                        redeemersBody.appendChild(tr);
+                    });
+                }
+                
+                // --- 2. Populate UP Positions Table ---
+                const upBody = document.getElementById('upPositionsTableBody');
+                upBody.innerHTML = '';
+                if (data.top_up.length === 0) {
+                    upBody.innerHTML = `<tr><td colspan="4"><div class="empty-state"><i class="fa-solid fa-circle-question"></i><br>Hissedar kaydı bulunamadı.</div></td></tr>`;
+                } else {
+                    data.top_up.forEach((p, idx) => {
+                        const tr = document.createElement('tr');
+                        tr.innerHTML = `
+                            <td><div class="rank-badge">${idx + 1}</div></td>
+                            <td>
+                                <div class="address-col">
+                                    <a href="https://polygonscan.com/address/${p.account}" target="_blank" class="address-link">${shortAddress(p.account)}</a>
+                                    <button class="copy-btn" onclick="copyText('${p.account}', this)"><i class="fa-regular fa-copy"></i></button>
+                                </div>
+                            </td>
+                            <td><span class="shares-badge peak">${p.peak.toLocaleString('tr-TR', { maximumFractionDigits: 2 })} adet</span></td>
+                            <td><span class="shares-badge">${p.current.toLocaleString('tr-TR', { maximumFractionDigits: 2 })} adet</span></td>
+                        `;
+                        upBody.appendChild(tr);
+                    });
+                }
+                
+                // --- 3. Populate DOWN Positions Table ---
+                const downBody = document.getElementById('downPositionsTableBody');
+                downBody.innerHTML = '';
+                if (data.top_down.length === 0) {
+                    downBody.innerHTML = `<tr><td colspan="4"><div class="empty-state"><i class="fa-solid fa-circle-question"></i><br>Hissedar kaydı bulunamadı.</div></td></tr>`;
+                } else {
+                    data.top_down.forEach((p, idx) => {
+                        const tr = document.createElement('tr');
+                        tr.innerHTML = `
+                            <td><div class="rank-badge">${idx + 1}</div></td>
+                            <td>
+                                <div class="address-col">
+                                    <a href="https://polygonscan.com/address/${p.account}" target="_blank" class="address-link">${shortAddress(p.account)}</a>
+                                    <button class="copy-btn" onclick="copyText('${p.account}', this)"><i class="fa-regular fa-copy"></i></button>
+                                </div>
+                            </td>
+                            <td><span class="shares-badge peak">${p.peak.toLocaleString('tr-TR', { maximumFractionDigits: 2 })} adet</span></td>
+                            <td><span class="shares-badge">${p.current.toLocaleString('tr-TR', { maximumFractionDigits: 2 })} adet</span></td>
+                        `;
+                        downBody.appendChild(tr);
+                    });
+                }
+                
+            } catch (err) {
+                loadingState.style.display = 'none';
+                alert(err.message || 'Analiz sırasında beklenmeyen bir ağ hatası meydana geldi.');
+            }
+        });
+    </script>
+</body>
+</html>
