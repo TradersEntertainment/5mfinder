@@ -5,7 +5,7 @@ import requests
 from flask import Flask, request, jsonify, render_template
 from web3 import Web3
 
-# Try importing Geth PoA middleware across all possible web3.py versions (v5, v6, v7, v8)
+# Try importing Geth PoA middleware across all possible web3.py versions
 poa_middleware = None
 try:
     from web3.middleware import geth_poa_middleware as poa_middleware
@@ -23,11 +23,15 @@ except ImportError:
 
 app = Flask(__name__)
 
-# Public working Polygon RPC
-RPC_URL = "https://1rpc.io/matic"
+# List of high-performance public Polygon RPCs
+RPC_URLS = [
+    "https://polygon.drpc.org",
+    "https://polygon.publicnode.com",
+    "https://polygon-rpc.com"
+]
 CTF_ADDRESS = Web3.to_checksum_address("0x4d97dcd97ec945f40cf65f87097ace5ea0476045")
 
-# Standard CTF ABI for payouts and event parsing
+# Standard ABI only for contract state calls
 CTF_ABI = [
     {
         "constant": True,
@@ -42,43 +46,6 @@ CTF_ABI = [
         "payable": False,
         "stateMutability": "view",
         "type": "function"
-    },
-    {
-        "anonymous": False,
-        "inputs": [
-            {"indexed": True, "name": "redeemer", "type": "address"},
-            {"indexed": True, "name": "collateralToken", "type": "address"},
-            {"indexed": True, "name": "parentCollectionId", "type": "bytes32"},
-            {"indexed": False, "name": "conditionId", "type": "bytes32"},
-            {"indexed": False, "name": "indexSets", "type": "uint256[]"},
-            {"indexed": False, "name": "payout", "type": "uint256"}
-        ],
-        "name": "PayoutRedemption",
-        "type": "event"
-    },
-    {
-        "anonymous": False,
-        "inputs": [
-            {"indexed": True, "name": "operator", "type": "address"},
-            {"indexed": True, "name": "from", "type": "address"},
-            {"indexed": True, "name": "to", "type": "address"},
-            {"indexed": False, "name": "id", "type": "uint256"},
-            {"indexed": False, "name": "value", "type": "uint256"}
-        ],
-        "name": "TransferSingle",
-        "type": "event"
-    },
-    {
-        "anonymous": False,
-        "inputs": [
-            {"indexed": True, "name": "operator", "type": "address"},
-            {"indexed": True, "name": "from", "type": "address"},
-            {"indexed": True, "name": "to", "type": "address"},
-            {"indexed": False, "name": "ids", "type": "uint256[]"},
-            {"indexed": False, "name": "values", "type": "uint256[]"}
-        ],
-        "name": "TransferBatch",
-        "type": "event"
     }
 ]
 
@@ -95,18 +62,17 @@ def extract_slug(url_or_slug):
     return url_or_slug
 
 def get_web3():
-    for attempt in range(5):
-        try:
-            w3 = Web3(Web3.HTTPProvider(RPC_URL))
-            # Inject PoA middleware if successfully imported
-            if poa_middleware is not None:
-                w3.middleware_onion.inject(poa_middleware, layer=0)
-            if w3.is_connected():
-                return w3
-        except Exception as e:
-            print(f"Connection attempt {attempt} failed: {e}")
-            time.sleep(2)
-    raise Exception("Failed to connect to RPC")
+    for rpc in RPC_URLS:
+        for attempt in range(2):
+            try:
+                w3 = Web3(Web3.HTTPProvider(rpc))
+                if poa_middleware is not None:
+                    w3.middleware_onion.inject(poa_middleware, layer=0)
+                if w3.is_connected():
+                    return w3
+            except Exception:
+                time.sleep(1)
+    raise Exception("Could not connect to any public Polygon RPC node")
 
 def call_rpc_logs(w3, from_block, to_block, topics):
     for attempt in range(5):
@@ -119,7 +85,12 @@ def call_rpc_logs(w3, from_block, to_block, topics):
             })
             return logs
         except Exception:
-            time.sleep(1.5 ** attempt + 0.5)
+            time.sleep(1)
+            # Auto-heal: Try to get a fresh web3 from fallback RPCs on failure
+            try:
+                w3 = get_web3()
+            except Exception:
+                pass
     raise Exception(f"Failed to fetch logs from {from_block} to {to_block}")
 
 def estimate_block_by_timestamp(w3, target_ts):
@@ -261,46 +232,54 @@ def analyze():
                 for log in logs:
                     t0 = log["topics"][0].hex()
                     
+                    # 1. PayoutRedemption (Manual decode to bypass Python 3.13 map_abi_data bug)
                     if t0 == payout_redemption_topic0[2:]:
                         try:
-                            decoded = contract.events.PayoutRedemption().process_log(log)
-                            args = decoded["args"]
-                            if args["conditionId"].hex() == condition_id[2:]:
+                            redeemer = Web3.to_checksum_address("0x" + log["topics"][1][-20:].hex())
+                            # Decode data: bytes32 conditionId, uint[] indexSets, uint payout
+                            cond_id_bytes, index_sets, payout = w3.codec.decode(['bytes32', 'uint256[]', 'uint256'], log["data"])
+                            if cond_id_bytes.hex() == condition_id[2:]:
                                 redemptions_raw.append({
                                     "tx_hash": log["transactionHash"].hex(),
                                     "block": log["blockNumber"],
-                                    "redeemer": args["redeemer"],
-                                    "payout": args["payout"] / 1e6,
-                                    "indexSets": args["indexSets"]
+                                    "redeemer": redeemer,
+                                    "payout": payout / 1e6, # USDC decimals
+                                    "indexSets": index_sets
                                 })
                         except Exception:
                             pass
                             
+                    # 2. TransferSingle (Manual decode to bypass Python 3.13 map_abi_data bug)
                     elif t0 == transfer_single_topic0[2:]:
                         try:
-                            decoded = contract.events.TransferSingle().process_log(log)
-                            args = decoded["args"]
-                            if args["id"] in (up_token_dec, down_token_dec):
+                            frm = Web3.to_checksum_address("0x" + log["topics"][2][-20:].hex())
+                            to = Web3.to_checksum_address("0x" + log["topics"][3][-20:].hex())
+                            # Decode data: uint256 id, uint256 value
+                            tid, val = w3.codec.decode(['uint256', 'uint256'], log["data"])
+                            if tid in (up_token_dec, down_token_dec):
                                 transfers_raw.append({
                                     "block": log["blockNumber"],
-                                    "from": args["from"],
-                                    "to": args["to"],
-                                    "id": args["id"],
-                                    "value": args["value"]
+                                    "from": frm,
+                                    "to": to,
+                                    "id": tid,
+                                    "value": val
                                 })
                         except Exception:
                             pass
                             
+                    # 3. TransferBatch (Manual decode to bypass Python 3.13 map_abi_data bug)
                     elif t0 == transfer_batch_topic0[2:]:
                         try:
-                            decoded = contract.events.TransferBatch().process_log(log)
-                            args = decoded["args"]
-                            for tid, val in zip(args["ids"], args["values"]):
+                            frm = Web3.to_checksum_address("0x" + log["topics"][2][-20:].hex())
+                            to = Web3.to_checksum_address("0x" + log["topics"][3][-20:].hex())
+                            # Decode data: uint256[] ids, uint256[] values
+                            tids, vals = w3.codec.decode(['uint256[]', 'uint256[]'], log["data"])
+                            for tid, val in zip(tids, vals):
                                 if tid in (up_token_dec, down_token_dec):
                                     transfers_raw.append({
                                         "block": log["blockNumber"],
-                                        "from": args["from"],
-                                        "to": args["to"],
+                                        "from": frm,
+                                        "to": to,
                                         "id": tid,
                                         "value": val
                                     })
@@ -308,7 +287,7 @@ def analyze():
                             pass
             except Exception:
                 pass
-            time.sleep(0.1)
+            time.sleep(0.15)
             
         balances = {}
         max_balances = {}
