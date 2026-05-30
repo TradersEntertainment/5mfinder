@@ -4,7 +4,22 @@ import time
 import requests
 from flask import Flask, request, jsonify, render_template
 from web3 import Web3
-from web3.middleware import geth_poa_middleware
+
+# Try importing Geth PoA middleware across all possible web3.py versions (v5, v6, v7, v8)
+poa_middleware = None
+try:
+    from web3.middleware import geth_poa_middleware as poa_middleware
+except ImportError:
+    try:
+        from web3.middleware.geth_poa import geth_poa_middleware as poa_middleware
+    except ImportError:
+        try:
+            from web3.middleware import ExtraDataToPOAMiddleware as poa_middleware
+        except ImportError:
+            try:
+                from web3.middleware import extra_data_rpc_middleware as poa_middleware
+            except ImportError:
+                pass
 
 app = Flask(__name__)
 
@@ -83,8 +98,9 @@ def get_web3():
     for attempt in range(5):
         try:
             w3 = Web3(Web3.HTTPProvider(RPC_URL))
-            # Inject geth_poa_middleware for Polygon PoA chain compatibility in Web3.py v6
-            w3.middleware_onion.inject(geth_poa_middleware, layer=0)
+            # Inject PoA middleware if successfully imported
+            if poa_middleware is not None:
+                w3.middleware_onion.inject(poa_middleware, layer=0)
             if w3.is_connected():
                 return w3
         except Exception as e:
