@@ -495,7 +495,10 @@ def analyze():
                 "endBlock": target_end_block,
                 "scannedBlocks": target_end_block - start_block,
                 "resolvedBlock": target_end_block,
-                "rpcErrors": rpc_errors
+                "rpcErrors": rpc_errors,
+                "allLogsCount": len(all_logs),
+                "transfersCount": len(transfers_raw),
+                "redemptionsCount": len(redemptions_raw)
             },
             "top_up": up_peak_positions[:50],
             "top_down": down_peak_positions[:50],
