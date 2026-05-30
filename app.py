@@ -331,12 +331,23 @@ def analyze():
         print(f"[TRACE] Combined logs count: {len(all_logs)}")
         
         for log in all_logs:
-            t0 = log["topics"][0].hex()
+            # Secure t0 decode (immune to bytes vs str and 0x prefixing)
+            t0_raw = log["topics"][0]
+            t0 = t0_raw.hex() if isinstance(t0_raw, bytes) else str(t0_raw)
+            t0 = t0.lower()
+            if t0.startswith("0x"):
+                t0 = t0[2:]
             
             # 1. PayoutRedemption
             if t0 == payout_redemption_topic0[2:]:
                 try:
-                    redeemer = Web3.to_checksum_address("0x" + log["topics"][1][-20:].hex())
+                    t1 = log["topics"][1]
+                    t1_hex = t1.hex() if isinstance(t1, bytes) else str(t1)
+                    t1_hex = t1_hex.lower()
+                    if t1_hex.startswith("0x"):
+                        t1_hex = t1_hex[2:]
+                    redeemer = Web3.to_checksum_address("0x" + t1_hex[-40:])
+                    
                     cond_id_bytes, index_sets, payout = w3.codec.decode(['bytes32', 'uint256[]', 'uint256'], log["data"])
                     if cond_id_bytes.hex() == condition_id[2:]:
                         redemptions_raw.append({
@@ -361,8 +372,17 @@ def analyze():
                         
                     tid_hex = data_hex[0:64]
                     if tid_hex in (up_token_hex, down_token_hex):
-                        frm = Web3.to_checksum_address("0x" + log["topics"][2][-20:].hex())
-                        to = Web3.to_checksum_address("0x" + log["topics"][3][-20:].hex())
+                        t2 = log["topics"][2]
+                        t3 = log["topics"][3]
+                        t2_hex = t2.hex() if isinstance(t2, bytes) else str(t2)
+                        t3_hex = t3.hex() if isinstance(t3, bytes) else str(t3)
+                        t2_hex = t2_hex.lower()
+                        t3_hex = t3_hex.lower()
+                        if t2_hex.startswith("0x"): t2_hex = t2_hex[2:]
+                        if t3_hex.startswith("0x"): t3_hex = t3_hex[2:]
+                        frm = Web3.to_checksum_address("0x" + t2_hex[-40:])
+                        to = Web3.to_checksum_address("0x" + t3_hex[-40:])
+                        
                         tid, val = w3.codec.decode(['uint256', 'uint256'], log["data"])
                         transfers_raw.append({
                             "block": log["blockNumber"],
@@ -385,8 +405,17 @@ def analyze():
                         data_hex = data_hex[2:]
                         
                     if up_token_hex in data_hex or down_token_hex in data_hex:
-                        frm = Web3.to_checksum_address("0x" + log["topics"][2][-20:].hex())
-                        to = Web3.to_checksum_address("0x" + log["topics"][3][-20:].hex())
+                        t2 = log["topics"][2]
+                        t3 = log["topics"][3]
+                        t2_hex = t2.hex() if isinstance(t2, bytes) else str(t2)
+                        t3_hex = t3.hex() if isinstance(t3, bytes) else str(t3)
+                        t2_hex = t2_hex.lower()
+                        t3_hex = t3_hex.lower()
+                        if t2_hex.startswith("0x"): t2_hex = t2_hex[2:]
+                        if t3_hex.startswith("0x"): t3_hex = t3_hex[2:]
+                        frm = Web3.to_checksum_address("0x" + t2_hex[-40:])
+                        to = Web3.to_checksum_address("0x" + t3_hex[-40:])
+                        
                         tids, vals = w3.codec.decode(['uint256[]', 'uint256[]'], log["data"])
                         for tid, val in zip(tids, vals):
                             if tid in (up_token_dec, down_token_dec):
