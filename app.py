@@ -4,7 +4,7 @@ import time
 import requests
 from flask import Flask, request, jsonify, render_template
 from web3 import Web3
-from web3.middleware import extra_data_rpc_middleware
+from web3.middleware import geth_poa_middleware
 
 app = Flask(__name__)
 
@@ -83,8 +83,8 @@ def get_web3():
     for attempt in range(5):
         try:
             w3 = Web3(Web3.HTTPProvider(RPC_URL))
-            # Inject extra_data_rpc_middleware for Polygon PoA chain compatibility
-            w3.middleware_onion.inject(extra_data_rpc_middleware, layer=0)
+            # Inject geth_poa_middleware for Polygon PoA chain compatibility in Web3.py v6
+            w3.middleware_onion.inject(geth_poa_middleware, layer=0)
             if w3.is_connected():
                 return w3
         except Exception as e:
