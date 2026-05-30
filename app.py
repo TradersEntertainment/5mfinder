@@ -274,6 +274,7 @@ def analyze():
         active_logs = []
         chunks = []
         chunk_size = 50
+        rpc_errors = []
         for chunk_start in range(start_block, transfers_end_block + 1, chunk_size):
             chunk_end = min(chunk_start + chunk_size - 1, transfers_end_block)
             chunks.append((chunk_start, chunk_end))
@@ -291,7 +292,9 @@ def analyze():
                     chunk_logs = future.result()
                     active_logs.extend(chunk_logs)
                 except Exception as e:
-                    print(f"[ERROR] Failed to fetch active chunk {cs} to {ce}: {e}")
+                    err_msg = f"Failed to fetch active chunk {cs} to {ce}: {str(e)}"
+                    print(f"[ERROR] {err_msg}")
+                    rpc_errors.append(err_msg)
                     
         # Sort chronologically to preserve balance logic order
         active_logs.sort(key=lambda x: (x.get("blockNumber", 0), x.get("logIndex", 0)))
@@ -319,7 +322,9 @@ def analyze():
                         chunk_logs = future.result()
                         post_logs.extend(chunk_logs)
                     except Exception as e:
-                        print(f"[ERROR] Failed to fetch post chunk {cs} to {ce}: {e}")
+                        err_msg = f"Failed to fetch post chunk {cs} to {ce}: {str(e)}"
+                        print(f"[ERROR] {err_msg}")
+                        rpc_errors.append(err_msg)
                         
         all_logs = active_logs + post_logs
         all_logs.sort(key=lambda x: (x.get("blockNumber", 0), x.get("logIndex", 0)))
@@ -489,7 +494,8 @@ def analyze():
                 "startBlock": start_block,
                 "endBlock": target_end_block,
                 "scannedBlocks": target_end_block - start_block,
-                "resolvedBlock": target_end_block
+                "resolvedBlock": target_end_block,
+                "rpcErrors": rpc_errors
             },
             "top_up": up_peak_positions[:50],
             "top_down": down_peak_positions[:50],
