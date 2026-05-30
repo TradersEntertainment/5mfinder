@@ -4,6 +4,7 @@ import time
 import requests
 from flask import Flask, request, jsonify, render_template
 from web3 import Web3
+from web3.middleware import extra_data_rpc_middleware
 
 app = Flask(__name__)
 
@@ -67,7 +68,6 @@ CTF_ABI = [
 ]
 
 def extract_slug(url_or_slug):
-    # Extracts slug from URL e.g. https://polymarket.com/event/btc-updown-5m-1780131600
     url_or_slug = url_or_slug.strip()
     if "/" in url_or_slug:
         match = re.search(r'/event/([^/?#]+)', url_or_slug)
@@ -76,15 +76,21 @@ def extract_slug(url_or_slug):
         match = re.search(r'/market/([^/?#]+)', url_or_slug)
         if match:
             return match.group(1)
-        # Fallback to last segment
         return url_or_slug.split("/")[-1]
     return url_or_slug
 
 def get_web3():
-    w3 = Web3(Web3.HTTPProvider(RPC_URL))
-    if not w3.is_connected():
-        raise Exception("Could not connect to Polygon RPC")
-    return w3
+    for attempt in range(5):
+        try:
+            w3 = Web3(Web3.HTTPProvider(RPC_URL))
+            # Inject extra_data_rpc_middleware for Polygon PoA chain compatibility
+            w3.middleware_onion.inject(extra_data_rpc_middleware, layer=0)
+            if w3.is_connected():
+                return w3
+        except Exception as e:
+            print(f"Connection attempt {attempt} failed: {e}")
+            time.sleep(2)
+    raise Exception("Failed to connect to RPC")
 
 def call_rpc_logs(w3, from_block, to_block, topics):
     for attempt in range(5):
@@ -101,7 +107,6 @@ def call_rpc_logs(w3, from_block, to_block, topics):
     raise Exception(f"Failed to fetch logs from {from_block} to {to_block}")
 
 def estimate_block_by_timestamp(w3, target_ts):
-    # Estimates the block number for a given timestamp
     latest_block = w3.eth.get_block("latest")
     latest_num = latest_block["number"]
     latest_ts = latest_block["timestamp"]
@@ -109,8 +114,6 @@ def estimate_block_by_timestamp(w3, target_ts):
     if target_ts >= latest_ts:
         return latest_num
         
-    # Standard Polygon block time is ~1.75 - 2.0 seconds
-    # Let's fetch a block from 20000 blocks ago to get average block time
     ref_num = latest_num - 20000
     ref_block = w3.eth.get_block(ref_num)
     ref_ts = ref_block["timestamp"]
@@ -118,7 +121,6 @@ def estimate_block_by_timestamp(w3, target_ts):
     avg_block_time = (latest_ts - ref_ts) / (latest_num - ref_num)
     estimated_num = int(latest_num - (latest_ts - target_ts) / avg_block_time)
     
-    # Simple binary/interpolation alignment
     for attempt in range(5):
         if estimated_num > latest_num:
             estimated_num = latest_num
@@ -160,7 +162,6 @@ def analyze():
             
         market = markets_data[0]
         
-        # Basic details
         title = market.get("question", "Bilinmeyen Piyasa")
         description = market.get("description", "")
         condition_id = market.get("conditionId", "")
@@ -186,41 +187,32 @@ def analyze():
         up_token_dec = int(clob_token_ids[0])
         down_token_dec = int(clob_token_ids[1])
         
-        # Start and End Times
         start_date_str = market.get("startDate")
         end_date_str = market.get("endDate")
         
-        # Parse ISO timestamps to Epoch
         from dateutil import parser
         try:
             start_ts = int(parser.isoparse(start_date_str).timestamp())
         except Exception:
-            start_ts = int(time.time()) - 3600 # Fallback 1 hour ago
+            start_ts = int(time.time()) - 3600
             
         try:
             end_ts = int(parser.isoparse(end_date_str).timestamp())
         except Exception:
-            end_ts = int(time.time()) + 300 # Fallback
+            end_ts = int(time.time()) + 300
             
-        # Connect to blockchain
         w3 = get_web3()
         contract = w3.eth.contract(address=CTF_ADDRESS, abi=CTF_ABI)
         
-        # Find start block and end block
-        # We start 10 minutes before the official market start to capture liquidity deposits/merges
         start_block = estimate_block_by_timestamp(w3, start_ts - 600)
         
-        # We end up to current block
         latest_block_data = w3.eth.get_block("latest")
         latest_block = latest_block_data["number"]
-        latest_ts = latest_block_data["timestamp"]
         
-        # Limit the block search range to latest or at most 45 minutes after end_ts
         target_end_block = estimate_block_by_timestamp(w3, end_ts + 2700)
         if target_end_block > latest_block:
             target_end_block = latest_block
             
-        # 2. Check Resolution State on-chain
         is_resolved = False
         winning_outcome = "Belirlenmedi"
         payouts = [0, 0]
@@ -234,9 +226,8 @@ def analyze():
                 else:
                     winning_outcome = outcomes[1] if len(outcomes) > 1 else "DOWN"
         except Exception:
-            pass # Not resolved yet or call reverted
+            pass
             
-        # 3. Query combined logs using logical OR
         payout_redemption_topic0 = w3.to_hex(w3.keccak(text="PayoutRedemption(address,address,bytes32,bytes32,uint256[],uint256)"))
         transfer_single_topic0 = w3.to_hex(w3.keccak(text="TransferSingle(address,address,address,uint256,uint256)"))
         transfer_batch_topic0 = w3.to_hex(w3.keccak(text="TransferBatch(address,address,address,uint256[],uint256[])"))
@@ -254,7 +245,6 @@ def analyze():
                 for log in logs:
                     t0 = log["topics"][0].hex()
                     
-                    # PayoutRedemption
                     if t0 == payout_redemption_topic0[2:]:
                         try:
                             decoded = contract.events.PayoutRedemption().process_log(log)
@@ -264,13 +254,12 @@ def analyze():
                                     "tx_hash": log["transactionHash"].hex(),
                                     "block": log["blockNumber"],
                                     "redeemer": args["redeemer"],
-                                    "payout": args["payout"] / 1e6, # USDC decimals
+                                    "payout": args["payout"] / 1e6,
                                     "indexSets": args["indexSets"]
                                 })
                         except Exception:
                             pass
                             
-                    # TransferSingle
                     elif t0 == transfer_single_topic0[2:]:
                         try:
                             decoded = contract.events.TransferSingle().process_log(log)
@@ -286,7 +275,6 @@ def analyze():
                         except Exception:
                             pass
                             
-                    # TransferBatch
                     elif t0 == transfer_batch_topic0[2:]:
                         try:
                             decoded = contract.events.TransferBatch().process_log(log)
@@ -304,9 +292,8 @@ def analyze():
                             pass
             except Exception:
                 pass
-            time.sleep(0.1) # Safe rate-limiting delay
+            time.sleep(0.1)
             
-        # 4. Process Positions and Balances
         balances = {}
         max_balances = {}
         
@@ -331,7 +318,6 @@ def analyze():
             update_balance(frm, tid, -val)
             update_balance(to, tid, val)
             
-        # 5. Process Redemptions
         redeemers_summary = {}
         for r in redemptions_raw:
             redeemer = r["redeemer"]
@@ -348,7 +334,6 @@ def analyze():
             if r["tx_hash"] not in redeemers_summary[redeemer]["txs"]:
                 redeemers_summary[redeemer]["txs"].append(r["tx_hash"])
                 
-        # 6. Format Top Positions lists
         up_peak_positions = []
         down_peak_positions = []
         
@@ -359,7 +344,6 @@ def analyze():
             curr_up = balances[account][up_token_dec] / 1e6
             curr_down = balances[account][down_token_dec] / 1e6
             
-            # Clean up tiny floating residues
             if abs(curr_up) < 0.01: curr_up = 0.0
             if abs(curr_down) < 0.01: curr_down = 0.0
             
@@ -379,7 +363,6 @@ def analyze():
         up_peak_positions.sort(key=lambda x: x["peak"], reverse=True)
         down_peak_positions.sort(key=lambda x: x["peak"], reverse=True)
         
-        # Format redeemers list
         redeemers_list = []
         for acc, summary in redeemers_summary.items():
             if summary["total_payout"] > 0.01:
@@ -391,7 +374,6 @@ def analyze():
                 })
         redeemers_list.sort(key=lambda x: x["payout"], reverse=True)
         
-        # Clean metadata response
         result = {
             "metadata": {
                 "title": title,
@@ -405,7 +387,7 @@ def analyze():
                 "startBlock": start_block,
                 "endBlock": target_end_block,
                 "scannedBlocks": target_end_block - start_block,
-                "resolvedBlock": target_end_block # reference block range
+                "resolvedBlock": target_end_block
             },
             "top_up": up_peak_positions[:50],
             "top_down": down_peak_positions[:50],
