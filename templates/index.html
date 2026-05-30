@@ -828,6 +828,14 @@
                         <div class="stat-label"><i class="fa-solid fa-user-group"></i> Benzersiz Redeemers</div>
                         <div id="statRedeemers" class="stat-val purple">0 cüzdan</div>
                     </div>
+                    <div class="stat-box">
+                        <div class="stat-label"><i class="fa-solid fa-arrows-left-right"></i> Bulunan Transfer</div>
+                        <div id="statTransfers" class="stat-val cyan">0</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label"><i class="fa-solid fa-triangle-exclamation"></i> Basarisiz Chunk</div>
+                        <div id="statChunksFailed" class="stat-val purple">0</div>
+                    </div>
                 </div>
                 
                 <!-- Tabs Area -->
@@ -1053,6 +1061,12 @@
                 document.getElementById('statLiquidity').innerText = formatUSD(meta.liquidity);
                 document.getElementById('statBlocks').innerText = meta.scannedBlocks.toLocaleString('tr-TR') + ' blok';
                 document.getElementById('statRedeemers').innerText = data.redeemers.length + ' cüzdan';
+                
+                // Debug stats
+                if (meta.transfersFound !== undefined) {
+                    document.getElementById('statTransfers').innerText = meta.transfersFound + ' transfer';
+                    document.getElementById('statChunksFailed').innerText = (meta.chunksFailed || 0) + ' / ' + (meta.chunksScanned || 0) + ' chunk';
+                }
                 
                 // --- 1. Populate Redeemers Table ---
                 const redeemersBody = document.getElementById('redeemersTableBody');
