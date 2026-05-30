@@ -133,22 +133,35 @@ def analyze():
         data = request.json or {}
         url_or_slug = data.get("url")
         if not url_or_slug:
-            return jsonify({"error": "Lütfen bir Polymarket linki veya slug girin."}), 400
+            return jsonify({"error": "Lütfen bir Polymarket linki veya slug girin."}), 200
             
         slug = extract_slug(url_or_slug)
         
-        # 1. Fetch Market details from Gamma API
+        # 1. Fetch Market details from Gamma API (Markets endpoint)
         gamma_url = f"https://gamma-api.polymarket.com/markets?slug={slug}"
         resp = requests.get(gamma_url, timeout=10)
-        if resp.status_code != 200:
-            return jsonify({"error": "Polymarket API'sine bağlanılamadı."}), 500
-            
-        markets_data = resp.json()
-        if not markets_data or not isinstance(markets_data, list):
-            return jsonify({"error": "Bu linke ait aktif bir market bulunamadı. Lütfen slug'ı kontrol edin."}), 404
-            
-        market = markets_data[0]
+        market = None
         
+        if resp.status_code == 200:
+            markets_data = resp.json()
+            if markets_data and isinstance(markets_data, list) and len(markets_data) > 0:
+                market = markets_data[0]
+                
+        # If not found, try the Events endpoint (Polymarket often stores high-frequency events as events instead of raw markets)
+        if not market:
+            events_url = f"https://gamma-api.polymarket.com/events?slug={slug}"
+            resp = requests.get(events_url, timeout=10)
+            if resp.status_code == 200:
+                events_data = resp.json()
+                if events_data and isinstance(events_data, list) and len(events_data) > 0:
+                    event = events_data[0]
+                    event_markets = event.get("markets", [])
+                    if event_markets and len(event_markets) > 0:
+                        market = event_markets[0]
+                        
+        if not market:
+            return jsonify({"error": "Bu linke ait aktif veya geçmiş bir market/etkinlik bulunamadı. Lütfen slug'ı kontrol edin."}), 200
+            
         title = market.get("question", "Bilinmeyen Piyasa")
         description = market.get("description", "")
         condition_id = market.get("conditionId", "")
@@ -169,7 +182,7 @@ def analyze():
                 outcomes = ["UP", "DOWN"]
                 
         if not condition_id or len(clob_token_ids) < 2:
-            return jsonify({"error": "Market akıllı sözleşme verileri eksik."}), 400
+            return jsonify({"error": "Market akıllı sözleşme verileri eksik veya bu bir melez/negatif risk piyasası."}), 200
             
         up_token_dec = int(clob_token_ids[0])
         down_token_dec = int(clob_token_ids[1])
@@ -236,14 +249,13 @@ def analyze():
                     if t0 == payout_redemption_topic0[2:]:
                         try:
                             redeemer = Web3.to_checksum_address("0x" + log["topics"][1][-20:].hex())
-                            # Decode data: bytes32 conditionId, uint[] indexSets, uint payout
                             cond_id_bytes, index_sets, payout = w3.codec.decode(['bytes32', 'uint256[]', 'uint256'], log["data"])
                             if cond_id_bytes.hex() == condition_id[2:]:
                                 redemptions_raw.append({
                                     "tx_hash": log["transactionHash"].hex(),
                                     "block": log["blockNumber"],
                                     "redeemer": redeemer,
-                                    "payout": payout / 1e6, # USDC decimals
+                                    "payout": payout / 1e6,
                                     "indexSets": index_sets
                                 })
                         except Exception:
@@ -254,7 +266,6 @@ def analyze():
                         try:
                             frm = Web3.to_checksum_address("0x" + log["topics"][2][-20:].hex())
                             to = Web3.to_checksum_address("0x" + log["topics"][3][-20:].hex())
-                            # Decode data: uint256 id, uint256 value
                             tid, val = w3.codec.decode(['uint256', 'uint256'], log["data"])
                             if tid in (up_token_dec, down_token_dec):
                                 transfers_raw.append({
@@ -272,7 +283,6 @@ def analyze():
                         try:
                             frm = Web3.to_checksum_address("0x" + log["topics"][2][-20:].hex())
                             to = Web3.to_checksum_address("0x" + log["topics"][3][-20:].hex())
-                            # Decode data: uint256[] ids, uint256[] values
                             tids, vals = w3.codec.decode(['uint256[]', 'uint256[]'], log["data"])
                             for tid, val in zip(tids, vals):
                                 if tid in (up_token_dec, down_token_dec):
@@ -394,7 +404,7 @@ def analyze():
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return jsonify({"error": f"Bir hata oluştu: {str(e)}"}), 500
+        return jsonify({"error": f"Beklenmedik bir sunucu hatası oluştu: {str(e)}"}), 200
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
