@@ -1,38 +1,54 @@
 import os
 import re
-import json
 import time
 import requests
 from flask import Flask, request, jsonify, render_template
+from web3 import Web3
+
+# Try importing Geth PoA middleware across all possible web3.py versions
+poa_middleware = None
+try:
+    from web3.middleware import geth_poa_middleware as poa_middleware
+except ImportError:
+    try:
+        from web3.middleware.geth_poa import geth_poa_middleware as poa_middleware
+    except ImportError:
+        try:
+            from web3.middleware import ExtraDataToPOAMiddleware as poa_middleware
+        except ImportError:
+            try:
+                from web3.middleware import extra_data_rpc_middleware as poa_middleware
+            except ImportError:
+                pass
 
 app = Flask(__name__)
 
-# High-performance public Polygon RPCs (ordered by reliability)
+# List of high-performance public Polygon RPCs (ordered by getLogs compatibility)
 RPC_URLS = [
+    "https://polygon-public.nodies.app/",
+    "https://polygon.api.onfinality.io/public",
     "https://polygon.drpc.org",
-    "https://polygon.publicnode.com",
-    "https://polygon-rpc.com",
-    "https://rpc.ankr.com/polygon",
-    "https://polygon-mainnet.public.blastapi.io",
-    "https://polygon.llamarpc.com",
-    "https://polygon.gateway.tenderly.co",
+    "https://polygon.publicnode.com"
 ]
+CTF_ADDRESS = Web3.to_checksum_address("0x4d97dcd97ec945f40cf65f87097ace5ea0476045")
 
-CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
-
-# Pre-compute event topic hashes
-try:
-    from web3 import Web3
-    _w3 = Web3()
-    PAYOUT_REDEMPTION_TOPIC = "0x" + _w3.keccak(text="PayoutRedemption(address,address,bytes32,bytes32,uint256[],uint256)").hex()
-    TRANSFER_SINGLE_TOPIC = "0x" + _w3.keccak(text="TransferSingle(address,address,address,uint256,uint256)").hex()
-    TRANSFER_BATCH_TOPIC = "0x" + _w3.keccak(text="TransferBatch(address,address,address,uint256[],uint256[])").hex()
-except Exception:
-    # Verified correct fallback hashes
-    PAYOUT_REDEMPTION_TOPIC = "0x2682012a4a4f1973119f1c9b90745d1bd91fa2bab387344f044cb3586864d18d"
-    TRANSFER_SINGLE_TOPIC = "0xc3d58168c5ae7397731d063d5bbf3d657854427343f4c083240f7aacaa2d0f62"
-    TRANSFER_BATCH_TOPIC = "0x4a39dc06d4c0dbc64b70af90fd698a233a518aa5d07e595d983b8c0526c8f7fb"
-
+# Standard ABI only for contract state calls
+CTF_ABI = [
+    {
+        "constant": True,
+        "inputs": [
+            {"name": "conditionId", "type": "bytes32"},
+            {"name": "index", "type": "uint256"}
+        ],
+        "name": "payoutNumerators",
+        "outputs": [
+            {"name": "", "type": "uint256"}
+        ],
+        "payable": False,
+        "stateMutability": "view",
+        "type": "function"
+    }
+]
 
 def extract_slug(url_or_slug):
     url_or_slug = url_or_slug.strip()
@@ -46,157 +62,71 @@ def extract_slug(url_or_slug):
         return url_or_slug.split("/")[-1]
     return url_or_slug
 
-
-def rpc_call(method, params=None, rpc_url=None, retries=2):
-    """Raw JSON-RPC call with multi-RPC fallback."""
-    if params is None:
-        params = []
-    urls = [rpc_url] if rpc_url else RPC_URLS
-
-    for url in urls:
-        for attempt in range(retries):
+def get_web3():
+    for rpc in RPC_URLS:
+        for attempt in range(2):
             try:
-                resp = requests.post(url, json={
-                    "jsonrpc": "2.0",
-                    "method": method,
-                    "params": params,
-                    "id": 1
-                }, timeout=12)
-                data = resp.json()
-                if "error" in data:
-                    break  # try next RPC
-                return data.get("result")
+                w3 = Web3(Web3.HTTPProvider(rpc))
+                if poa_middleware is not None:
+                    w3.middleware_onion.inject(poa_middleware, layer=0)
+                if w3.is_connected():
+                    return w3
             except Exception:
-                time.sleep(0.3 * (attempt + 1))
-    return None
+                time.sleep(1)
+    raise Exception("Could not connect to any public Polygon RPC node")
 
+def call_rpc_logs(w3, from_block, to_block, topics):
+    for attempt in range(5):
+        try:
+            logs = w3.eth.get_logs({
+                "fromBlock": from_block,
+                "toBlock": to_block,
+                "address": CTF_ADDRESS,
+                "topics": topics
+            })
+            return logs
+        except Exception:
+            time.sleep(1)
+            # Auto-heal: Try to get a fresh web3 from fallback RPCs on failure
+            try:
+                w3 = get_web3()
+            except Exception:
+                pass
+    raise Exception(f"Failed to fetch logs from {from_block} to {to_block}")
 
-def get_latest_block():
-    result = rpc_call("eth_blockNumber")
-    if result:
-        return int(result, 16)
-    return None
-
-
-def get_block_timestamp(block_num):
-    result = rpc_call("eth_getBlockByNumber", [hex(block_num), False])
-    if result and "timestamp" in result:
-        return int(result["timestamp"], 16)
-    return None
-
-
-def estimate_block_by_timestamp(target_ts):
-    latest_num = get_latest_block()
-    if latest_num is None:
-        raise Exception("Cannot get latest block")
-    latest_ts = get_block_timestamp(latest_num)
-    if latest_ts is None:
-        raise Exception("Cannot get latest block timestamp")
+def estimate_block_by_timestamp(w3, target_ts):
+    latest_block = w3.eth.get_block("latest")
+    latest_num = latest_block["number"]
+    latest_ts = latest_block["timestamp"]
+    
     if target_ts >= latest_ts:
         return latest_num
-
-    avg_block_time = 2.1
-    estimated = int(latest_num - (latest_ts - target_ts) / avg_block_time)
-
-    for _ in range(6):
-        if estimated > latest_num:
-            estimated = latest_num
-        if estimated < 1:
-            estimated = 1
-        ts = get_block_timestamp(estimated)
-        if ts is None:
-            break
+        
+    ref_num = latest_num - 20000
+    ref_block = w3.eth.get_block(ref_num)
+    ref_ts = ref_block["timestamp"]
+    
+    avg_block_time = (latest_ts - ref_ts) / (latest_num - ref_num)
+    estimated_num = int(latest_num - (latest_ts - target_ts) / avg_block_time)
+    
+    for attempt in range(5):
+        if estimated_num > latest_num:
+            estimated_num = latest_num
+        block = w3.eth.get_block(estimated_num)
+        ts = block["timestamp"]
         diff = target_ts - ts
         if abs(diff) <= 15:
-            return estimated
+            return estimated_num
         adj = int(diff / avg_block_time)
         if adj == 0:
             adj = 1 if diff > 0 else -1
-        estimated += adj
-    return estimated
-
-
-def fetch_logs_with_fallback(from_block, to_block, topics):
-    """Fetch logs, auto-retry with smaller chunks if RPC rejects range."""
-    params = [{
-        "fromBlock": hex(from_block),
-        "toBlock": hex(to_block),
-        "address": CTF_ADDRESS,
-        "topics": topics
-    }]
-
-    for url in RPC_URLS:
-        try:
-            resp = requests.post(url, json={
-                "jsonrpc": "2.0",
-                "method": "eth_getLogs",
-                "params": params,
-                "id": 1
-            }, timeout=20)
-            data = resp.json()
-            if "error" not in data and data.get("result") is not None:
-                return data["result"]
-        except Exception:
-            continue
-    return None
-
-
-def hex_to_address(hex_str):
-    if hex_str.startswith("0x"):
-        hex_str = hex_str[2:]
-    return "0x" + hex_str[-40:]
-
-
-def decode_transfer_single_data(data_hex):
-    if data_hex.startswith("0x"):
-        data_hex = data_hex[2:]
-    token_id = int(data_hex[0:64], 16)
-    value = int(data_hex[64:128], 16)
-    return token_id, value
-
-
-def decode_payout_redemption_data(data_hex):
-    if data_hex.startswith("0x"):
-        data_hex = data_hex[2:]
-    condition_id = data_hex[0:64]
-    payout = int(data_hex[128:192], 16)
-    array_offset = int(data_hex[64:128], 16) * 2
-    array_length = int(data_hex[array_offset:array_offset + 64], 16)
-    index_sets = []
-    for i in range(array_length):
-        s = array_offset + 64 + (i * 64)
-        index_sets.append(int(data_hex[s:s + 64], 16))
-    return condition_id, index_sets, payout
-
-
-def decode_transfer_batch_data(data_hex):
-    if data_hex.startswith("0x"):
-        data_hex = data_hex[2:]
-    ids_offset = int(data_hex[0:64], 16) * 2
-    vals_offset = int(data_hex[64:128], 16) * 2
-    ids_len = int(data_hex[ids_offset:ids_offset + 64], 16)
-    ids = [int(data_hex[ids_offset + 64 + i * 64:ids_offset + 128 + i * 64], 16) for i in range(ids_len)]
-    vals_len = int(data_hex[vals_offset:vals_offset + 64], 16)
-    vals = [int(data_hex[vals_offset + 64 + i * 64:vals_offset + 128 + i * 64], 16) for i in range(vals_len)]
-    return ids, vals
-
-
-def check_payout_numerators(condition_id, index):
-    func_selector = "0xfe14112d"
-    cid = condition_id[2:] if condition_id.startswith("0x") else condition_id
-    cid = cid.zfill(64)
-    idx_hex = hex(index)[2:].zfill(64)
-    call_data = func_selector + cid + idx_hex
-    result = rpc_call("eth_call", [{"to": CTF_ADDRESS, "data": call_data}, "latest"])
-    if result and result != "0x":
-        return int(result, 16)
-    return 0
-
+        estimated_num += adj
+        
+    return estimated_num
 
 @app.route("/")
 def index():
     return render_template("index.html")
-
 
 @app.route("/api/analyze", methods=["POST"])
 def analyze():
@@ -204,284 +134,349 @@ def analyze():
         data = request.json or {}
         url_or_slug = data.get("url")
         if not url_or_slug:
-            return jsonify({"error": "Lutfen bir Polymarket linki veya slug girin."}), 200
-
+            return jsonify({"error": "Lütfen bir Polymarket linki veya slug girin."}), 200
+            
         slug = extract_slug(url_or_slug)
-
-        # 1. Fetch Market from Gamma API
+        
+        # 1. Fetch Market details from Gamma API (Markets endpoint)
+        gamma_url = f"https://gamma-api.polymarket.com/markets?slug={slug}"
+        resp = requests.get(gamma_url, timeout=10)
         market = None
-        for endpoint in ["markets", "events"]:
-            gamma_url = f"https://gamma-api.polymarket.com/{endpoint}?slug={slug}"
-            try:
-                resp = requests.get(gamma_url, timeout=10)
-                if resp.status_code == 200:
-                    payload = resp.json()
-                    if payload and isinstance(payload, list) and len(payload) > 0:
-                        item = payload[0]
-                        if endpoint == "events":
-                            ms = item.get("markets", [])
-                            if ms:
-                                market = ms[0]
-                        else:
-                            market = item
-                    if market:
-                        break
-            except Exception:
-                continue
-
+        
+        if resp.status_code == 200:
+            markets_data = resp.json()
+            if markets_data and isinstance(markets_data, list) and len(markets_data) > 0:
+                market = markets_data[0]
+                
+        # If not found, try the Events endpoint (Polymarket often stores high-frequency events as events instead of raw markets)
         if not market:
-            return jsonify({"error": "Bu linke ait aktif veya gecmis bir market bulunamadi."}), 200
-
+            events_url = f"https://gamma-api.polymarket.com/events?slug={slug}"
+            resp = requests.get(events_url, timeout=10)
+            if resp.status_code == 200:
+                events_data = resp.json()
+                if events_data and isinstance(events_data, list) and len(events_data) > 0:
+                    event = events_data[0]
+                    event_markets = event.get("markets", [])
+                    if event_markets and len(event_markets) > 0:
+                        market = event_markets[0]
+                        
+        if not market:
+            return jsonify({"error": "Bu linke ait aktif veya geçmiş bir market/etkinlik bulunamadı. Lütfen slug'ı kontrol edin."}), 200
+            
         title = market.get("question", "Bilinmeyen Piyasa")
         description = market.get("description", "")
         condition_id = market.get("conditionId", "")
         clob_token_ids = market.get("clobTokenIds", "[]")
-
+        
         if isinstance(clob_token_ids, str):
+            import json
             try:
                 clob_token_ids = json.loads(clob_token_ids)
             except Exception:
                 clob_token_ids = []
-
+                
         outcomes = market.get("outcomes", "[]")
         if isinstance(outcomes, str):
             try:
                 outcomes = json.loads(outcomes)
             except Exception:
                 outcomes = ["UP", "DOWN"]
-
+                
         if not condition_id or len(clob_token_ids) < 2:
-            return jsonify({"error": "Market akilli sozlesme verileri eksik."}), 200
-
+            return jsonify({"error": "Market akıllı sözleşme verileri eksik veya bu bir melez/negatif risk piyasası."}), 200
+            
         up_token_dec = int(clob_token_ids[0])
         down_token_dec = int(clob_token_ids[1])
-
-        # 2. Determine the ACTUAL event time window
-        # For 5-minute markets: endDate is when the event ends
-        # startDate is when the market was CREATED (could be hours/days before)
-        # We need to scan from a reasonable window before endDate, not from creation
-        from dateutil import parser as dateparser
-
-        end_date_str = market.get("endDate")
+        up_token_hex = hex(up_token_dec)[2:].zfill(64).lower()
+        down_token_hex = hex(down_token_dec)[2:].zfill(64).lower()
+        
         start_date_str = market.get("startDate")
-
+        end_date_str = market.get("endDate")
+        event_start_time_str = market.get("eventStartTime")
+        
+        from dateutil import parser
         try:
-            end_ts = int(dateparser.isoparse(end_date_str).timestamp())
+            if event_start_time_str:
+                start_ts = int(parser.isoparse(event_start_time_str).timestamp()) - 120  # 2 minutes buffer before event start
+            else:
+                start_ts = int(parser.isoparse(start_date_str).timestamp())
+        except Exception:
+            try:
+                start_ts = int(parser.isoparse(start_date_str).timestamp())
+            except Exception:
+                start_ts = int(time.time()) - 3600
+            
+        try:
+            end_ts = int(parser.isoparse(end_date_str).timestamp())
         except Exception:
             end_ts = int(time.time()) + 300
-
-        try:
-            start_ts = int(dateparser.isoparse(start_date_str).timestamp())
-        except Exception:
-            start_ts = end_ts - 3600
-
-        # Smart block range: use the shorter of (market creation) vs (endDate - 4 hours)
-        # For 5m markets, most trading happens within hours of the event
-        # Cap the max scan window to avoid scanning 40K+ blocks on free RPCs
-        max_scan_seconds = 4 * 3600  # 4 hours max lookback
-        effective_start_ts = max(start_ts, end_ts - max_scan_seconds)
-
-        # Scan from (effective_start - 5 min) to (end + 45 min for redemptions)
-        scan_start_ts = effective_start_ts - 300
-        scan_end_ts = end_ts + 2700
-
-        # 3. Estimate block range
-        start_block = estimate_block_by_timestamp(scan_start_ts)
-
-        latest_block = get_latest_block()
-        if latest_block is None:
-            return jsonify({"error": "Polygon agina baglanilamadi."}), 200
-
-        target_end_block = estimate_block_by_timestamp(scan_end_ts)
+            
+        w3 = get_web3()
+        print(f"[TRACE] Connected to Web3. RPC: {w3.provider.endpoint_uri}")
+        contract = w3.eth.contract(address=CTF_ADDRESS, abi=CTF_ABI)
+        
+        # Smart block range lookback (12 mins for 5m/15m markets, 40 mins max for others) to avoid scanning massive historic noise
+        slug_lower = slug.lower()
+        question_lower = title.lower()
+        if "5m" in slug_lower or "5-minute" in slug_lower or "5m" in question_lower or "5-minute" in question_lower:
+            lookback_seconds = 12 * 60
+        elif "15m" in slug_lower or "15-minute" in slug_lower or "15m" in question_lower or "15-minute" in question_lower:
+            lookback_seconds = 25 * 60
+        else:
+            lookback_seconds = 40 * 60
+            
+        effective_start_ts = max(start_ts, end_ts - lookback_seconds)
+        print(f"[TRACE] Start TS: {start_ts}, End TS: {end_ts}, Effective Start TS: {effective_start_ts}")
+        start_block = estimate_block_by_timestamp(w3, effective_start_ts)
+        
+        latest_block_data = w3.eth.get_block("latest")
+        latest_block = latest_block_data["number"]
+        
+        # For transfers, we only scan up to end_ts + 60
+        transfers_end_block = estimate_block_by_timestamp(w3, end_ts + 60)
+        if transfers_end_block > latest_block:
+            transfers_end_block = latest_block
+            
+        # For payout redemptions, we scan up to end_ts + 2700 (45 minutes post-close)
+        target_end_block = estimate_block_by_timestamp(w3, end_ts + 2700)
         if target_end_block > latest_block:
             target_end_block = latest_block
-
-        total_blocks = target_end_block - start_block
-        print(f"[DEBUG] Scanning blocks {start_block} to {target_end_block} ({total_blocks} blocks)")
-
-        # 4. Check if market resolved
+            
+        print(f"[TRACE] Transfer scan range: {start_block} to {transfers_end_block} (size: {transfers_end_block - start_block})")
+        print(f"[TRACE] Full redemption scan range: {start_block} to {target_end_block} (size: {target_end_block - start_block})")
+            
         is_resolved = False
         winning_outcome = "Belirlenmedi"
-        payouts_val = [0, 0]
+        payouts = [0, 0]
         try:
-            payouts_val[0] = check_payout_numerators(condition_id, 0)
-            payouts_val[1] = check_payout_numerators(condition_id, 1)
-            if payouts_val[0] > 0 or payouts_val[1] > 0:
+            payouts[0] = contract.functions.payoutNumerators(condition_id, 0).call()
+            payouts[1] = contract.functions.payoutNumerators(condition_id, 1).call()
+            if payouts[0] > 0 or payouts[1] > 0:
                 is_resolved = True
-                if payouts_val[0] > payouts_val[1]:
+                if payouts[0] > payouts[1]:
                     winning_outcome = outcomes[0] if len(outcomes) > 0 else "UP"
                 else:
                     winning_outcome = outcomes[1] if len(outcomes) > 1 else "DOWN"
         except Exception:
             pass
-
-        # 5. Scan blockchain logs - use small chunks for free RPC compatibility
-        # Free RPCs typically support 1000-3000 block ranges
-        chunk_size = 2000
+            
+        payout_redemption_topic0 = w3.to_hex(w3.keccak(text="PayoutRedemption(address,address,bytes32,bytes32,uint256[],uint256)"))
+        transfer_single_topic0 = w3.to_hex(w3.keccak(text="TransferSingle(address,address,address,uint256,uint256)"))
+        transfer_batch_topic0 = w3.to_hex(w3.keccak(text="TransferBatch(address,address,address,uint256[],uint256[])"))
+        
         redemptions_raw = []
         transfers_raw = []
-
-        combined_topics = [[
-            PAYOUT_REDEMPTION_TOPIC,
-            TRANSFER_SINGLE_TOPIC,
-            TRANSFER_BATCH_TOPIC
-        ]]
-
-        payout_hex = PAYOUT_REDEMPTION_TOPIC[2:].lower()
-        tsingle_hex = TRANSFER_SINGLE_TOPIC[2:].lower()
-        tbatch_hex = TRANSFER_BATCH_TOPIC[2:].lower()
-        cond_id_clean = (condition_id[2:] if condition_id.startswith("0x") else condition_id).lower()
-
-        chunks_total = max(1, (total_blocks + chunk_size - 1) // chunk_size)
-        chunks_done = 0
-        chunks_failed = 0
-
-        for chunk_start in range(start_block, target_end_block + 1, chunk_size):
-            chunk_end = min(chunk_start + chunk_size - 1, target_end_block)
+        
+        combined_topics = [[payout_redemption_topic0, transfer_single_topic0, transfer_batch_topic0]]
+        
+        # Parallel fetch for transfers & active period redemptions
+        print(f"[TRACE] Fetching active logs in parallel from block {start_block} to {transfers_end_block}...")
+        active_logs = []
+        chunks = []
+        chunk_size = 50
+        for chunk_start in range(start_block, transfers_end_block + 1, chunk_size):
+            chunk_end = min(chunk_start + chunk_size - 1, transfers_end_block)
+            chunks.append((chunk_start, chunk_end))
             
-            # Try fetching logs, with automatic retry using smaller chunk on failure
-            logs = fetch_logs_with_fallback(chunk_start, chunk_end, combined_topics)
+        def fetch_active_chunk(c_start, c_end):
+            thread_w3 = get_web3()
+            return call_rpc_logs(thread_w3, c_start, c_end, combined_topics)
             
-            # If the full chunk failed, try splitting into smaller sub-chunks
-            if logs is None:
-                sub_chunk = chunk_size // 2
-                for sub_start in range(chunk_start, chunk_end + 1, sub_chunk):
-                    sub_end = min(sub_start + sub_chunk - 1, chunk_end)
-                    sub_logs = fetch_logs_with_fallback(sub_start, sub_end, combined_topics)
-                    if sub_logs is None:
-                        # Try even smaller
-                        micro_chunk = sub_chunk // 2
-                        for micro_start in range(sub_start, sub_end + 1, micro_chunk):
-                            micro_end = min(micro_start + micro_chunk - 1, sub_end)
-                            micro_logs = fetch_logs_with_fallback(micro_start, micro_end, combined_topics)
-                            if micro_logs:
-                                if logs is None:
-                                    logs = []
-                                logs.extend(micro_logs)
-                            time.sleep(0.2)
-                    else:
-                        if logs is None:
-                            logs = []
-                        logs.extend(sub_logs)
-                    time.sleep(0.1)
-
-            if not logs:
-                chunks_failed += 1
-                chunks_done += 1
-                continue
-
-            for log in logs:
-                topics_list = log.get("topics", [])
-                if not topics_list:
-                    continue
-
-                t0 = topics_list[0]
-                if t0.startswith("0x"):
-                    t0 = t0[2:]
-                t0 = t0.lower()
-
-                log_data = log.get("data", "0x")
-                block_num = int(log.get("blockNumber", "0x0"), 16) if isinstance(log.get("blockNumber"), str) else log.get("blockNumber", 0)
-                tx_hash = log.get("transactionHash", "")
-
-                if t0 == payout_hex:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futures = {executor.submit(fetch_active_chunk, cs, ce): (cs, ce) for cs, ce in chunks}
+            for future in as_completed(futures):
+                cs, ce = futures[future]
+                try:
+                    chunk_logs = future.result()
+                    active_logs.extend(chunk_logs)
+                except Exception as e:
+                    print(f"[ERROR] Failed to fetch active chunk {cs} to {ce}: {e}")
+                    
+        # Sort chronologically to preserve balance logic order
+        active_logs.sort(key=lambda x: (x.get("blockNumber", 0), x.get("logIndex", 0)))
+        print(f"[TRACE] Active logs fetched: {len(active_logs)}")
+        
+        # Fetch remaining post-close redemptions in larger chunks (extremely fast)
+        post_logs = []
+        if target_end_block > transfers_end_block:
+            print(f"[TRACE] Fetching post-close redemption logs from block {transfers_end_block + 1} to {target_end_block}...")
+            post_chunks = []
+            post_chunk_size = 500
+            for chunk_start in range(transfers_end_block + 1, target_end_block + 1, post_chunk_size):
+                chunk_end = min(chunk_start + post_chunk_size - 1, target_end_block)
+                post_chunks.append((chunk_start, chunk_end))
+                
+            def fetch_post_chunk(c_start, c_end):
+                thread_w3 = get_web3()
+                return call_rpc_logs(thread_w3, c_start, c_end, [[payout_redemption_topic0]])
+                
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                futures = {executor.submit(fetch_post_chunk, cs, ce): (cs, ce) for cs, ce in post_chunks}
+                for future in as_completed(futures):
+                    cs, ce = futures[future]
                     try:
-                        redeemer = hex_to_address(topics_list[1])
-                        cond_decoded, index_sets, payout_amount = decode_payout_redemption_data(log_data)
-                        if cond_decoded.lower() == cond_id_clean:
-                            redemptions_raw.append({
-                                "tx_hash": tx_hash,
-                                "block": block_num,
-                                "redeemer": redeemer,
-                                "payout": payout_amount / 1e6,
-                                "indexSets": index_sets
-                            })
-                    except Exception:
-                        pass
-
-                elif t0 == tsingle_hex:
-                    try:
-                        frm = hex_to_address(topics_list[2])
-                        to = hex_to_address(topics_list[3])
-                        tid, val = decode_transfer_single_data(log_data)
-                        if tid in (up_token_dec, down_token_dec):
-                            transfers_raw.append({"block": block_num, "from": frm, "to": to, "id": tid, "value": val})
-                    except Exception:
-                        pass
-
-                elif t0 == tbatch_hex:
-                    try:
-                        frm = hex_to_address(topics_list[2])
-                        to = hex_to_address(topics_list[3])
-                        tids, vals = decode_transfer_batch_data(log_data)
+                        chunk_logs = future.result()
+                        post_logs.extend(chunk_logs)
+                    except Exception as e:
+                        print(f"[ERROR] Failed to fetch post chunk {cs} to {ce}: {e}")
+                        
+        all_logs = active_logs + post_logs
+        all_logs.sort(key=lambda x: (x.get("blockNumber", 0), x.get("logIndex", 0)))
+        print(f"[TRACE] Combined logs count: {len(all_logs)}")
+        
+        for log in all_logs:
+            t0 = log["topics"][0].hex()
+            
+            # 1. PayoutRedemption
+            if t0 == payout_redemption_topic0[2:]:
+                try:
+                    redeemer = Web3.to_checksum_address("0x" + log["topics"][1][-20:].hex())
+                    cond_id_bytes, index_sets, payout = w3.codec.decode(['bytes32', 'uint256[]', 'uint256'], log["data"])
+                    if cond_id_bytes.hex() == condition_id[2:]:
+                        redemptions_raw.append({
+                            "tx_hash": log["transactionHash"].hex(),
+                            "block": log["blockNumber"],
+                            "redeemer": redeemer,
+                            "payout": payout / 1e6,
+                            "indexSets": index_sets
+                        })
+                except Exception:
+                    pass
+                    
+            # 2. TransferSingle (with correct HexBytes-to-hex conversion fix!)
+            elif t0 == transfer_single_topic0[2:]:
+                try:
+                    data_hex = log["data"]
+                    if isinstance(data_hex, bytes):
+                        data_hex = data_hex.hex()
+                    data_hex = data_hex.lower()
+                    if data_hex.startswith("0x"):
+                        data_hex = data_hex[2:]
+                        
+                    tid_hex = data_hex[0:64]
+                    if tid_hex in (up_token_hex, down_token_hex):
+                        frm = Web3.to_checksum_address("0x" + log["topics"][2][-20:].hex())
+                        to = Web3.to_checksum_address("0x" + log["topics"][3][-20:].hex())
+                        tid, val = w3.codec.decode(['uint256', 'uint256'], log["data"])
+                        transfers_raw.append({
+                            "block": log["blockNumber"],
+                            "from": frm,
+                            "to": to,
+                            "id": tid,
+                            "value": val
+                        })
+                except Exception:
+                    pass
+                    
+            # 3. TransferBatch (with correct HexBytes-to-hex conversion fix!)
+            elif t0 == transfer_batch_topic0[2:]:
+                try:
+                    data_hex = log["data"]
+                    if isinstance(data_hex, bytes):
+                        data_hex = data_hex.hex()
+                    data_hex = data_hex.lower()
+                    if data_hex.startswith("0x"):
+                        data_hex = data_hex[2:]
+                        
+                    if up_token_hex in data_hex or down_token_hex in data_hex:
+                        frm = Web3.to_checksum_address("0x" + log["topics"][2][-20:].hex())
+                        to = Web3.to_checksum_address("0x" + log["topics"][3][-20:].hex())
+                        tids, vals = w3.codec.decode(['uint256[]', 'uint256[]'], log["data"])
                         for tid, val in zip(tids, vals):
                             if tid in (up_token_dec, down_token_dec):
-                                transfers_raw.append({"block": block_num, "from": frm, "to": to, "id": tid, "value": val})
-                    except Exception:
-                        pass
+                                transfers_raw.append({
+                                    "block": log["blockNumber"],
+                                    "from": frm,
+                                    "to": to,
+                                    "id": tid,
+                                    "value": val
+                                })
+                except Exception:
+                    pass
 
-            chunks_done += 1
-            time.sleep(0.15)
-
-        print(f"[DEBUG] Scan complete: {chunks_done}/{chunks_total} chunks, {chunks_failed} failed, {len(transfers_raw)} transfers, {len(redemptions_raw)} redemptions")
-
-        # 6. Aggregate balances
+            
         balances = {}
         max_balances = {}
-        ZERO = "0x0000000000000000000000000000000000000000"
-
+        
         def update_balance(account, token_id, amount):
-            al = account.lower()
-            if al == ZERO:
+            if account == "0x0000000000000000000000000000000000000000":
                 return
-            if al not in balances:
-                balances[al] = {up_token_dec: 0, down_token_dec: 0}
-            if al not in max_balances:
-                max_balances[al] = {up_token_dec: 0, down_token_dec: 0}
-            balances[al][token_id] += amount
-            if balances[al][token_id] > max_balances[al][token_id]:
-                max_balances[al][token_id] = balances[al][token_id]
-
+            if account not in balances:
+                balances[account] = {up_token_dec: 0, down_token_dec: 0}
+            if account not in max_balances:
+                max_balances[account] = {up_token_dec: 0, down_token_dec: 0}
+                
+            balances[account][token_id] += amount
+            if balances[account][token_id] > max_balances[account][token_id]:
+                max_balances[account][token_id] = balances[account][token_id]
+                
         for tx in transfers_raw:
-            update_balance(tx["from"], tx["id"], -tx["value"])
-            update_balance(tx["to"], tx["id"], tx["value"])
-
-        # 7. Aggregate redeemers
+            frm = tx["from"]
+            to = tx["to"]
+            tid = tx["id"]
+            val = tx["value"]
+            
+            update_balance(frm, tid, -val)
+            update_balance(to, tid, val)
+            
         redeemers_summary = {}
         for r in redemptions_raw:
-            redeemer = r["redeemer"].lower()
+            redeemer = r["redeemer"]
+            payout = r["payout"]
+            
             if redeemer not in redeemers_summary:
-                redeemers_summary[redeemer] = {"total_payout": 0.0, "tx_count": 0, "txs": []}
-            redeemers_summary[redeemer]["total_payout"] += r["payout"]
+                redeemers_summary[redeemer] = {
+                    "total_payout": 0.0,
+                    "tx_count": 0,
+                    "txs": []
+                }
+            redeemers_summary[redeemer]["total_payout"] += payout
             redeemers_summary[redeemer]["tx_count"] += 1
             if r["tx_hash"] not in redeemers_summary[redeemer]["txs"]:
                 redeemers_summary[redeemer]["txs"].append(r["tx_hash"])
-
-        # 8. Build result
-        up_peaks = []
-        down_peaks = []
-        for acct, mx in max_balances.items():
-            up_p = mx[up_token_dec] / 1e6
-            dn_p = mx[down_token_dec] / 1e6
-            cu = balances[acct][up_token_dec] / 1e6
-            cd = balances[acct][down_token_dec] / 1e6
-            if abs(cu) < 0.01: cu = 0.0
-            if abs(cd) < 0.01: cd = 0.0
-            if up_p > 0.1:
-                up_peaks.append({"account": acct, "peak": up_p, "current": cu})
-            if dn_p > 0.1:
-                down_peaks.append({"account": acct, "peak": dn_p, "current": cd})
-
-        up_peaks.sort(key=lambda x: x["peak"], reverse=True)
-        down_peaks.sort(key=lambda x: x["peak"], reverse=True)
-
-        rdm_list = []
-        for acc, s in redeemers_summary.items():
-            if s["total_payout"] > 0.01:
-                rdm_list.append({"account": acc, "payout": s["total_payout"], "tx_count": s["tx_count"], "latest_tx": s["txs"][-1]})
-        rdm_list.sort(key=lambda x: x["payout"], reverse=True)
-
-        return jsonify({
+                
+        up_peak_positions = []
+        down_peak_positions = []
+        
+        for account, max_vals in max_balances.items():
+            up_peak = max_vals[up_token_dec] / 1e6
+            down_peak = max_vals[down_token_dec] / 1e6
+            
+            curr_up = balances[account][up_token_dec] / 1e6
+            curr_down = balances[account][down_token_dec] / 1e6
+            
+            if abs(curr_up) < 0.01: curr_up = 0.0
+            if abs(curr_down) < 0.01: curr_down = 0.0
+            
+            if up_peak > 0.1:
+                up_peak_positions.append({
+                    "account": account,
+                    "peak": up_peak,
+                    "current": curr_up
+                })
+            if down_peak > 0.1:
+                down_peak_positions.append({
+                    "account": account,
+                    "peak": down_peak,
+                    "current": curr_down
+                })
+                
+        up_peak_positions.sort(key=lambda x: x["peak"], reverse=True)
+        down_peak_positions.sort(key=lambda x: x["peak"], reverse=True)
+        
+        redeemers_list = []
+        for acc, summary in redeemers_summary.items():
+            if summary["total_payout"] > 0.01:
+                redeemers_list.append({
+                    "account": acc,
+                    "payout": summary["total_payout"],
+                    "tx_count": summary["tx_count"],
+                    "latest_tx": summary["txs"][-1]
+                })
+        redeemers_list.sort(key=lambda x: x["payout"], reverse=True)
+        
+        result = {
             "metadata": {
                 "title": title,
                 "description": description,
@@ -493,23 +488,20 @@ def analyze():
                 "winningOutcome": winning_outcome,
                 "startBlock": start_block,
                 "endBlock": target_end_block,
-                "scannedBlocks": total_blocks,
-                "resolvedBlock": target_end_block,
-                "chunksScanned": chunks_done,
-                "chunksFailed": chunks_failed,
-                "transfersFound": len(transfers_raw),
-                "redemptionsFound": len(redemptions_raw)
+                "scannedBlocks": target_end_block - start_block,
+                "resolvedBlock": target_end_block
             },
-            "top_up": up_peaks[:50],
-            "top_down": down_peaks[:50],
-            "redeemers": rdm_list[:50]
-        })
-
+            "top_up": up_peak_positions[:50],
+            "top_down": down_peak_positions[:50],
+            "redeemers": redeemers_list[:50]
+        }
+        
+        return jsonify(result)
+        
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return jsonify({"error": f"Sunucu hatasi: {str(e)}"}), 200
-
+        return jsonify({"error": f"Beklenmedik bir sunucu hatası oluştu: {str(e)}"}), 200
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
