@@ -1063,43 +1063,69 @@ def scan_market_for_whales(market):
 
 def whale_scanner_loop():
     print("[INFO] Background Whale Scanner Thread Started.", flush=True)
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     from dateutil import parser
+    
     while True:
         try:
             active_5m_map = {}
             now_ts = int(time.time())
             
-            # 1. Fetch from 5M tag (tag_id=102892) sorted by endDate descending
-            try:
-                tag_resp = requests.get("https://gamma-api.polymarket.com/markets?tag_id=102892&active=true&closed=false&limit=100&order=endDate&ascending=false", timeout=10)
-                if tag_resp.status_code == 200:
-                    for m in tag_resp.json():
-                        m_id = m.get("id")
-                        slug = (m.get("slug") or "").lower()
-                        question = (m.get("question") or "").lower()
-                        end_date_str = m.get("endDate")
-                        
-                        if not end_date_str:
-                            continue
-                            
-                        try:
-                            end_ts = int(parser.isoparse(end_date_str).timestamp())
-                        except Exception:
-                            continue
-                            
-                        # Filter: Only keep markets that are active now (ends within 2 minutes in the past or up to 20 minutes in the future)
-                        if now_ts - 120 <= end_ts <= now_ts + 1200:
-                            if "5m" in slug or "5-minute" in slug or "5m" in question or "5-minute" in question:
-                                if m_id:
-                                    active_5m_map[m_id] = m
-            except Exception as tag_err:
-                print(f"[SCANNER WARNING] Tag ID fetch failed: {tag_err}", flush=True)
+            # Generate exact slugs for current time, previous time, and next 2 intervals (4 total intervals)
+            current_interval = (now_ts // 300) * 300
+            prev_interval = current_interval - 300
+            next_interval = current_interval + 300
+            next_next_interval = current_interval + 600
+            
+            intervals = [prev_interval, current_interval, next_interval, next_next_interval]
+            coins = ["btc", "eth", "xrp", "sol", "doge", "bnb", "hype"]
+            
+            slugs = []
+            for coin in coins:
+                for interval in intervals:
+                    slugs.append(f"{coin}-updown-5m-{interval}")
+                    
+            def fetch_market_by_slug(slug):
+                url = f"https://gamma-api.polymarket.com/markets?slug={slug}"
+                try:
+                    resp = requests.get(url, timeout=4)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        if data and isinstance(data, list) and len(data) > 0:
+                            return data[0]
+                except Exception:
+                    pass
+                return None
                 
-            # 2. Fetch from general active markets (fallback) sorted by endDate descending
+            # Fetch all slugs in parallel
+            with ThreadPoolExecutor(max_workers=15) as executor:
+                futures = {executor.submit(fetch_market_by_slug, slug): slug for slug in slugs}
+                for future in as_completed(futures):
+                    res = future.result()
+                    if res:
+                        m_id = res.get("id")
+                        slug = (res.get("slug") or "").lower()
+                        question = (res.get("question") or "").lower()
+                        end_date_str = res.get("endDate")
+                        
+                        if not end_date_str:
+                            continue
+                            
+                        try:
+                            end_ts = int(parser.isoparse(end_date_str).timestamp())
+                        except Exception:
+                            continue
+                            
+                        # Enforce precise live time window filter
+                        if now_ts - 120 <= end_ts <= now_ts + 1200:
+                            if m_id:
+                                active_5m_map[m_id] = res
+                                
+            # 2. General active markets tag-based sort fallback (in case slug naming changes)
             try:
-                gen_resp = requests.get("https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&order=endDate&ascending=false", timeout=10)
-                if gen_resp.status_code == 200:
-                    for m in gen_resp.json():
+                fallback_resp = requests.get("https://gamma-api.polymarket.com/markets?tag_id=102892&active=true&closed=false&limit=40&order=endDate&ascending=false", timeout=10)
+                if fallback_resp.status_code == 200:
+                    for m in fallback_resp.json():
                         m_id = m.get("id")
                         slug = (m.get("slug") or "").lower()
                         question = (m.get("question") or "").lower()
@@ -1113,13 +1139,12 @@ def whale_scanner_loop():
                         except Exception:
                             continue
                             
-                        # Filter: Only keep markets that are active now
                         if now_ts - 120 <= end_ts <= now_ts + 1200:
                             if "5m" in slug or "5-minute" in slug or "5m" in question or "5-minute" in question:
                                 if m_id:
                                     active_5m_map[m_id] = m
-            except Exception as gen_err:
-                print(f"[SCANNER WARNING] General active fetch failed: {gen_err}", flush=True)
+            except Exception as fb_err:
+                print(f"[SCANNER WARNING] Tag fallback failed: {fb_err}", flush=True)
                 
             active_5m = list(active_5m_map.values())
             print(f"[SCANNER] Found {len(active_5m)} active 5m markets to scan.", flush=True)
