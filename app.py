@@ -771,6 +771,27 @@ def check_if_new_account(address):
             
     return oldest_ts is not None and oldest_ts >= MAY_1_2026
 
+def fetch_pusd_balance(address):
+    try:
+        w3 = get_web3()
+        PUSD_CONTRACT = Web3.to_checksum_address("0xc011a7e12a19f7b1f670d46f03b03f3342e82dfb")
+        abi = [
+            {
+                "constant": True,
+                "inputs": [{"name": "_owner", "type": "address"}],
+                "name": "balanceOf",
+                "outputs": [{"name": "balance", "type": "uint256"}],
+                "type": "function"
+            }
+        ]
+        pusd = w3.eth.contract(address=PUSD_CONTRACT, abi=abi)
+        checksum_addr = Web3.to_checksum_address(address)
+        pusd_bal = pusd.functions.balanceOf(checksum_addr).call() / 1e6
+        return pusd_bal
+    except Exception as e:
+        print(f"[WARNING] Failed to fetch pUSD balance for {address}: {e}", flush=True)
+        return None
+
 def send_telegram_whale_alert(address, shares, avg_price, market_title, market_slug, outcome):
     try:
         BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -788,6 +809,9 @@ def send_telegram_whale_alert(address, shares, avg_price, market_title, market_s
             print(f"[FILTERED] Whale address {address} is an old account. Skipping Telegram alert.", flush=True)
             return
             
+        balance = fetch_pusd_balance(address)
+        balance_text = f"💵 <b>Hesap Bakiyesi (pUSD):</b> ${balance:,.2f}\n" if balance is not None else ""
+        
         text = (
             f"🚨 🐳 🆕 <b>5mFinder BALİNA ALARMI - YENİ HESAP!</b> 🆕 🐳 🚨\n\n"
             f"🔥 <b>YENİ KULLANICI UYARISI! (Joined May/June/July 2026)</b> 🔥\n\n"
@@ -795,6 +819,7 @@ def send_telegram_whale_alert(address, shares, avg_price, market_title, market_s
             f"👤 <b>Cüzdan Adresi:</b> <code>{address}</code>\n"
             f"📈 <b>Zirve Pozisyon:</b> {shares:,.0f} Shares ({outcome})\n"
             f"💰 <b>Tahmini Maliyet:</b> ${avg_price:.2f}\n"
+            f"{balance_text}"
         )
         
         APP_URL = os.environ.get("APP_URL", "https://5mfinder-production.up.railway.app").rstrip("/")
