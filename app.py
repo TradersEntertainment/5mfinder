@@ -780,26 +780,22 @@ def send_telegram_whale_alert(address, shares, avg_price, market_title, market_s
             print("[WARNING] TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID environment variables are not set. Skipping Telegram notification.", flush=True)
             return
         
-        # Check if user is a new account (Joined May or June 2026)
+        # Check if user is a new account (Joined May, June or July 2026)
         is_new = check_if_new_account(address)
         
-        if is_new:
-            text = (
-                f"🚨 🐳 🆕 <b>5mFinder BALİNA ALARMI - YENİ HESAP!</b> 🆕 🐳 🚨\n\n"
-                f"🔥 <b>YENİ KULLANICI UYARISI! (Joined May/June 2026)</b> 🔥\n\n"
-                f"📊 <b>Piyasa:</b> {market_title}\n"
-                f"👤 <b>Cüzdan Adresi:</b> <code>{address}</code>\n"
-                f"📈 <b>Zirve Pozisyon:</b> {shares:,.0f} Shares ({outcome})\n"
-                f"💰 <b>Tahmini Maliyet:</b> ${avg_price:.2f}\n"
-            )
-        else:
-            text = (
-                f"🚨 🐳 <b>5mFinder BALİNA ALARMI (4K+ SHARES)</b> 🐳 🚨\n\n"
-                f"📊 <b>Piyasa:</b> {market_title}\n"
-                f"👤 <b>Cüzdan Adresi:</b> <code>{address}</code>\n"
-                f"📈 <b>Zirve Pozisyon:</b> {shares:,.0f} Shares ({outcome})\n"
-                f"💰 <b>Tahmini Maliyet:</b> ${avg_price:.2f}\n"
-            )
+        # ONLY send alerts for new accounts (created in May, June, or July 2026)
+        if not is_new:
+            print(f"[FILTERED] Whale address {address} is an old account. Skipping Telegram alert.", flush=True)
+            return
+            
+        text = (
+            f"🚨 🐳 🆕 <b>5mFinder BALİNA ALARMI - YENİ HESAP!</b> 🆕 🐳 🚨\n\n"
+            f"🔥 <b>YENİ KULLANICI UYARISI! (Joined May/June/July 2026)</b> 🔥\n\n"
+            f"📊 <b>Piyasa:</b> {market_title}\n"
+            f"👤 <b>Cüzdan Adresi:</b> <code>{address}</code>\n"
+            f"📈 <b>Zirve Pozisyon:</b> {shares:,.0f} Shares ({outcome})\n"
+            f"💰 <b>Tahmini Maliyet:</b> ${avg_price:.2f}\n"
+        )
         
         APP_URL = os.environ.get("APP_URL", "https://5mfinder-production.up.railway.app").rstrip("/")
         
