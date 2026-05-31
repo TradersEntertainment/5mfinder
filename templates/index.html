@@ -1413,9 +1413,24 @@
                 } else {
                     data.scanned_markets.forEach(m => {
                         const tr = document.createElement('tr');
+                        const timeDiff = Math.floor(Date.now() / 1000) - m.timestamp;
+                        let timeText = 'Az önce';
+                        if (timeDiff > 60) {
+                            const mins = Math.floor(timeDiff / 60);
+                            if (mins < 60) {
+                                timeText = `${mins} dk önce`;
+                            } else {
+                                const hrs = Math.floor(mins / 60);
+                                timeText = `${hrs} sa önce`;
+                            }
+                        }
+                        
                         tr.innerHTML = `
                             <td>
-                                <div style="font-weight: 600; font-size: 0.85rem; color: var(--text-primary); max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${m.title}</div>
+                                <div style="display: flex; align-items: center; gap: 0.4rem;">
+                                    <div style="font-weight: 600; font-size: 0.85rem; color: var(--text-primary); max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${m.title}</div>
+                                    <span style="font-size: 0.7rem; color: var(--text-secondary); font-weight: 500; background: rgba(255,255,255,0.04); padding: 0.1rem 0.3rem; border-radius: 4px; flex-shrink: 0;">${timeText}</span>
+                                </div>
                                 <div style="font-size: 0.75rem; color: var(--text-secondary); font-family: monospace;">${m.slug}</div>
                             </td>
                             <td style="text-align: center;">
@@ -1441,11 +1456,24 @@
                     data.approaching_whales.forEach(w => {
                         const tr = document.createElement('tr');
                         const outcomeColor = w.outcome.toLowerCase() === 'up' ? 'var(--success)' : 'var(--danger)';
+                        const timeDiff = Math.floor(Date.now() / 1000) - w.timestamp;
+                        let timeText = 'Az önce';
+                        if (timeDiff > 60) {
+                            const mins = Math.floor(timeDiff / 60);
+                            if (mins < 60) {
+                                timeText = `${mins} dk önce`;
+                            } else {
+                                const hrs = Math.floor(mins / 60);
+                                timeText = `${hrs} sa önce`;
+                            }
+                        }
+                        
                         tr.innerHTML = `
                             <td>
                                 <div style="display: flex; align-items: center; gap: 0.4rem; font-family: monospace; font-size: 0.85rem; font-weight: 600; color: var(--accent-blue);">
                                     <a href="https://polymarket.com/profile/${w.address}" target="_blank" class="address-link">${shortAddress(w.address)}</a>
                                     <button class="copy-btn" onclick="copyText('${w.address}', this)"><i class="fa-regular fa-copy" style="font-size: 0.75rem;"></i></button>
+                                    <span style="font-size: 0.7rem; color: var(--text-secondary); font-weight: 500; font-family: sans-serif; background: rgba(255,255,255,0.04); padding: 0.1rem 0.3rem; border-radius: 4px; margin-left: 0.1rem; flex-shrink: 0;">${timeText}</span>
                                 </div>
                                 <div style="font-size: 0.75rem; color: var(--text-secondary); max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${w.market_title}">${w.market_title}</div>
                             </td>

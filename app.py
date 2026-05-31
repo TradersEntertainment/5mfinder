@@ -1015,8 +1015,27 @@ def scan_market_for_whales(market):
                         "avg_price": avg_price
                     })
                     
-        # Append to global approaching whales
-        scanner_state["approaching_whales"].extend(approaching_list)
+        # Safely insert or update global approaching whales to preserve history without duplicates!
+        for item in approaching_list:
+            item_address = item["address"].lower()
+            item_slug = item["market_slug"].lower()
+            item_outcome = item["outcome"].lower()
+            
+            existing_idx = -1
+            for idx, existing in enumerate(scanner_state["approaching_whales"]):
+                if (existing["address"].lower() == item_address and 
+                    existing["market_slug"].lower() == item_slug and 
+                    existing["outcome"].lower() == item_outcome):
+                    existing_idx = idx
+                    break
+            
+            item["timestamp"] = int(time.time())
+            if existing_idx != -1:
+                scanner_state["approaching_whales"].pop(existing_idx)
+            
+            scanner_state["approaching_whales"].insert(0, item)
+            
+        scanner_state["approaching_whales"] = scanner_state["approaching_whales"][:100]
         
         # Track scanned market rolling history
         market_already_scanned = False
@@ -1037,7 +1056,7 @@ def scan_market_for_whales(market):
                 "whales_count": whales_found_count,
                 "approaching_count": len(approaching_list)
             })
-            scanner_state["scanned_markets"] = scanner_state["scanned_markets"][:10]
+            scanner_state["scanned_markets"] = scanner_state["scanned_markets"][:30]
                         
     except Exception as e:
         print(f"[ERROR] Error scanning market {market.get('slug')}: {e}", flush=True)
@@ -1061,7 +1080,6 @@ def whale_scanner_loop():
                 # Update scanner state on each iteration
                 scanner_state["last_scan_time"] = int(time.time())
                 scanner_state["scanned_markets_count"] = len(active_5m)
-                scanner_state["approaching_whales"] = []
                 
                 for market in active_5m:
                     scan_market_for_whales(market)
