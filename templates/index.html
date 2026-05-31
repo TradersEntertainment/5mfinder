@@ -826,6 +826,78 @@
             <div class="network-tag">Polygon Network (USDC)</div>
         </header>
         
+        <!-- Live Scanner Dashboard -->
+        <section class="dashboard-grid" style="grid-template-columns: 1fr 1fr; margin-bottom: 2.5rem; animation: fadeInUp 0.8s ease;">
+            
+            <!-- Scanner Stats & Scans -->
+            <div class="glass-card" style="padding: 2rem; display: flex; flex-direction: column; gap: 1rem;">
+                <div class="column-header" style="border-bottom: 1px solid rgba(255, 255, 255, 0.08); padding-bottom: 1rem; margin-bottom: 0.5rem; display: flex; justify-content: space-between; align-items: center;">
+                    <div style="display: flex; align-items: center; gap: 0.6rem;">
+                        <i class="fa-solid fa-satellite-dish fa-spin" style="color: var(--accent-cyan);"></i> 
+                        <span style="font-family: 'Outfit', sans-serif; font-size: 1.2rem; font-weight: 700;">Canlı Tarayıcı İzleme</span>
+                    </div>
+                    <span id="scannerLastScan" style="font-size: 0.8rem; color: var(--accent-cyan); font-weight: 600;">Bekleniyor...</span>
+                </div>
+                
+                <div class="stats-grid" style="grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 0.5rem;">
+                    <div class="stat-box" style="padding: 1rem;">
+                        <div class="stat-label" style="font-size: 0.75rem;"><i class="fa-solid fa-bell"></i> Gönderilen Alarmlar</div>
+                        <div id="scannerAlertsCount" style="font-size: 1.2rem; font-weight: 800; color: var(--warning);">0</div>
+                    </div>
+                    <div class="stat-box" style="padding: 1rem;">
+                        <div class="stat-label" style="font-size: 0.75rem;"><i class="fa-solid fa-list-check"></i> Karaliste Boyutu</div>
+                        <div id="scannerBlacklistCount" style="font-size: 1.2rem; font-weight: 800; color: var(--danger);">0</div>
+                    </div>
+                </div>
+                
+                <div style="font-size: 0.85rem; font-weight: 600; color: var(--text-secondary); margin-bottom: 0.2rem;">Son Taranan 5m Marketler:</div>
+                <div class="table-responsive" style="max-height: 200px; overflow-y: auto;">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Market</th>
+                                <th style="width: 100px; text-align: center;">Taramalar</th>
+                                <th style="width: 80px; text-align: right;">Eylem</th>
+                            </tr>
+                        </thead>
+                        <tbody id="scannerRecentScansBody">
+                            <!-- Dynamic rows -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            
+            <!-- Whales in the Making (Balina Adayları) -->
+            <div class="glass-card" style="padding: 2rem; display: flex; flex-direction: column; gap: 1rem;">
+                <div class="column-header" style="border-bottom: 1px solid rgba(255, 255, 255, 0.08); padding-bottom: 1rem; margin-bottom: 0.5rem;">
+                    <div style="display: flex; align-items: center; gap: 0.6rem;">
+                        <i class="fa-solid fa-temperature-half" style="color: #ff9100;"></i> 
+                        <span style="font-family: 'Outfit', sans-serif; font-size: 1.2rem; font-weight: 700;">Balina Adayları (2,000 - 3,999 Shares)</span>
+                    </div>
+                </div>
+                
+                <div style="font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 0.2rem; line-height: 1.4;">
+                    Aktif 5m marketlerinde 4,000 limitine yaklaşan potansiyel balina adayları:
+                </div>
+                
+                <div class="table-responsive" style="max-height: 280px; overflow-y: auto;">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Cüzdan / Market</th>
+                                <th style="text-align: center; width: 120px;">Pozisyon</th>
+                                <th style="text-align: right; width: 80px;">Eylemler</th>
+                            </tr>
+                        </thead>
+                        <tbody id="scannerApproachingWhalesBody">
+                            <!-- Dynamic rows -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            
+        </section>
+        
         <!-- Main Form Glass Card -->
         <main class="glass-card">
             
@@ -1309,6 +1381,106 @@
                 alert('Hata oluştu.');
             }
         }
+        
+        // Live Scanner Dashboard Polling Logic
+        async function updateScannerDashboard() {
+            try {
+                // Fetch blacklist size count for the stats box
+                const blacklistResp = await fetch('/api/blacklist');
+                const blacklistList = await blacklistResp.json();
+                document.getElementById('scannerBlacklistCount').innerText = blacklistList.length;
+                
+                const response = await fetch('/api/scanner/status');
+                const data = await response.json();
+                
+                // Update stats
+                document.getElementById('scannerAlertsCount').innerText = data.total_alerts_sent;
+                
+                const lastScanDiff = Math.floor(Date.now() / 1000) - data.last_scan_time;
+                let lastScanText = 'Az önce tarandı';
+                if (data.last_scan_time === 0) {
+                    lastScanText = 'Taranıyor...';
+                } else if (lastScanDiff > 5) {
+                    lastScanText = `${lastScanDiff} saniye önce tarandı`;
+                }
+                document.getElementById('scannerLastScan').innerText = `● ${lastScanText}`;
+                
+                // Populate Scans table
+                const scansBody = document.getElementById('scannerRecentScansBody');
+                scansBody.innerHTML = '';
+                if (data.scanned_markets.length === 0) {
+                    scansBody.innerHTML = `<tr><td colspan="3"><div style="text-align: center; color: var(--text-secondary); padding: 1rem;">Henüz aktif tarama kaydı yok.</div></td></tr>`;
+                } else {
+                    data.scanned_markets.forEach(m => {
+                        const tr = document.createElement('tr');
+                        tr.innerHTML = `
+                            <td>
+                                <div style="font-weight: 600; font-size: 0.85rem; color: var(--text-primary); max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${m.title}</div>
+                                <div style="font-size: 0.75rem; color: var(--text-secondary); font-family: monospace;">${m.slug}</div>
+                            </td>
+                            <td style="text-align: center;">
+                                <div style="font-size: 0.8rem; font-weight: 700; color: var(--accent-purple);">${m.blocks_scanned} Blk</div>
+                                <div style="font-size: 0.75rem; color: var(--text-secondary);">${m.whales_count}🐳 / ${m.approaching_count} aday</div>
+                            </td>
+                            <td style="text-align: right;">
+                                <button onclick="quickAnalyze('${m.slug}')" style="background: rgba(0, 242, 254, 0.08); border: 1px solid rgba(0, 242, 254, 0.2); color: var(--accent-cyan); padding: 0.3rem 0.6rem; border-radius: 6px; font-weight: 700; font-size: 0.75rem; cursor: pointer; transition: all 0.2s ease;">
+                                    <i class="fa-solid fa-magnifying-glass"></i> İncele
+                                </button>
+                            </td>
+                        `;
+                        scansBody.appendChild(tr);
+                    });
+                }
+                
+                // Populate Approaching Whales table
+                const approachingBody = document.getElementById('scannerApproachingWhalesBody');
+                approachingBody.innerHTML = '';
+                if (data.approaching_whales.length === 0) {
+                    approachingBody.innerHTML = `<tr><td colspan="3"><div style="text-align: center; color: var(--text-secondary); padding: 2rem;"><i class="fa-solid fa-circle-check" style="color: var(--success); font-size: 1.2rem; margin-bottom: 0.5rem;"></i><br>Şu anda yaklaşan balina adayı yok.</div></td></tr>`;
+                } else {
+                    data.approaching_whales.forEach(w => {
+                        const tr = document.createElement('tr');
+                        const outcomeColor = w.outcome.toLowerCase() === 'up' ? 'var(--success)' : 'var(--danger)';
+                        tr.innerHTML = `
+                            <td>
+                                <div style="display: flex; align-items: center; gap: 0.4rem; font-family: monospace; font-size: 0.85rem; font-weight: 600; color: var(--accent-blue);">
+                                    <a href="https://polymarket.com/profile/${w.address}" target="_blank" class="address-link">${shortAddress(w.address)}</a>
+                                    <button class="copy-btn" onclick="copyText('${w.address}', this)"><i class="fa-regular fa-copy" style="font-size: 0.75rem;"></i></button>
+                                </div>
+                                <div style="font-size: 0.75rem; color: var(--text-secondary); max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${w.market_title}">${w.market_title}</div>
+                            </td>
+                            <td style="text-align: center; vertical-align: middle;">
+                                <div style="font-weight: 700; color: ${outcomeColor}; font-size: 0.85rem;">${w.shares.toLocaleString('tr-TR', {maximumFractionDigits:0})} (${w.outcome})</div>
+                                <div class="avg-price-badge" style="font-size: 0.7rem; padding: 0.1rem 0.3rem; margin-top: 0.15rem;">$${w.avg_price.toFixed(2)}</div>
+                            </td>
+                            <td style="text-align: right; vertical-align: middle;">
+                                <div style="display: flex; flex-direction: column; gap: 0.3rem; align-items: flex-end;">
+                                    <button onclick="quickAnalyze('${w.market_slug}')" style="background: rgba(0, 242, 254, 0.08); border: 1px solid rgba(0, 242, 254, 0.2); color: var(--accent-cyan); padding: 0.25rem 0.5rem; border-radius: 6px; font-weight: 700; font-size: 0.75rem; cursor: pointer; transition: all 0.2s ease; width: 65px; text-align: center;">
+                                        <i class="fa-solid fa-bolt"></i> Oku
+                                    </button>
+                                    <a href="https://www.betmoar.fun/profile/${w.address}" target="_blank" style="background: rgba(255, 145, 0, 0.08); border: 1px solid rgba(255, 145, 0, 0.2); color: #ff9100; text-decoration: none; padding: 0.25rem 0.5rem; border-radius: 6px; font-weight: 700; font-size: 0.75rem; display: inline-block; width: 65px; text-align: center; transition: all 0.2s ease;">
+                                        Moar
+                                    </a>
+                                </div>
+                            </td>
+                        `;
+                        approachingBody.appendChild(tr);
+                    });
+                }
+            } catch (err) {
+                console.error("Scanner dashboard update error:", err);
+            }
+        }
+        
+        window.quickAnalyze = function(slug) {
+            document.getElementById('marketUrl').value = `https://polymarket.com/event/${slug}`;
+            document.getElementById('btnAnalyze').click();
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+        };
+        
+        // Start polling every 10 seconds for ultra-live visual feel!
+        setInterval(updateScannerDashboard, 10000);
+        updateScannerDashboard();
         
         // Initial load
         loadBlacklist();

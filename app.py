@@ -88,6 +88,26 @@ def remove_from_blacklist():
         return jsonify({"success": True})
     return jsonify({"success": True, "message": "Adres karalistede bulunamadı."})
 
+# ----------------- BACKGROUND WHALE SCANNER SYSTEM STATE -----------------
+alerted_whales = set()
+
+scanner_state = {
+    "last_scan_time": 0,
+    "scanned_markets_count": 0,
+    "scanned_markets": [],
+    "approaching_whales": []
+}
+
+@app.route("/api/scanner/status", methods=["GET"])
+def get_scanner_status():
+    return jsonify({
+        "last_scan_time": scanner_state["last_scan_time"],
+        "scanned_markets_count": scanner_state["scanned_markets_count"],
+        "scanned_markets": scanner_state["scanned_markets"],
+        "approaching_whales": scanner_state["approaching_whales"],
+        "total_alerts_sent": len(alerted_whales)
+    })
+
 # List of high-performance public Polygon RPCs (ordered by getLogs compatibility)
 RPC_URLS = [
     "https://polygon-public.nodies.app/",
@@ -664,7 +684,6 @@ def analyze():
         return jsonify({"error": f"Beklenmedik bir sunucu hatası oluştu: {str(e)}"}), 200
 
 # ----------------- BACKGROUND WHALE SCANNER SYSTEM -----------------
-alerted_whales = set()
 
 def check_if_new_account(address):
     # May 1, 2026 UTC timestamp = 1777593600
@@ -955,6 +974,9 @@ def scan_market_for_whales(market):
         blacklist = load_blacklist()
         blacklist_lower = {addr.lower() for addr in blacklist}
         
+        whales_found_count = 0
+        approaching_list = []
+        
         for account, max_vals in max_balances.items():
             if account.lower() in EXCLUDED_ADDRESSES or account.lower() in blacklist_lower:
                 continue
@@ -971,10 +993,51 @@ def scan_market_for_whales(market):
                         print(f"[FILTERED] Whale address {account} with peak {peak_shares:,.0f} {name} filtered due to average price ${avg_price:.2f}", flush=True)
                         continue
                         
+                    whales_found_count += 1
                     whale_key = f"{slug}:{account}:{name}"
                     if whale_key not in alerted_whales:
                         alerted_whales.add(whale_key)
                         send_telegram_whale_alert(account, peak_shares, avg_price, title, slug, name)
+                        
+                elif 2000.0 <= peak_shares < 4000.0:
+                    sh = buy_shares.get(account, {}).get(tid, 0.0)
+                    avg_price = buy_costs.get(account, {}).get(tid, 0.0) / sh if sh > 0 else 0.50
+                    
+                    if avg_price <= 0.04 or avg_price >= 0.96:
+                        continue
+                        
+                    approaching_list.append({
+                        "address": account,
+                        "shares": peak_shares,
+                        "outcome": name,
+                        "market_title": title,
+                        "market_slug": slug,
+                        "avg_price": avg_price
+                    })
+                    
+        # Append to global approaching whales
+        scanner_state["approaching_whales"].extend(approaching_list)
+        
+        # Track scanned market rolling history
+        market_already_scanned = False
+        for m in scanner_state["scanned_markets"]:
+            if m["slug"] == slug:
+                m["timestamp"] = int(time.time())
+                m["whales_count"] = whales_found_count
+                m["approaching_count"] = len(approaching_list)
+                market_already_scanned = True
+                break
+                
+        if not market_already_scanned:
+            scanner_state["scanned_markets"].insert(0, {
+                "slug": slug,
+                "title": title,
+                "timestamp": int(time.time()),
+                "blocks_scanned": transfers_end_block - start_block,
+                "whales_count": whales_found_count,
+                "approaching_count": len(approaching_list)
+            })
+            scanner_state["scanned_markets"] = scanner_state["scanned_markets"][:10]
                         
     except Exception as e:
         print(f"[ERROR] Error scanning market {market.get('slug')}: {e}", flush=True)
@@ -994,6 +1057,12 @@ def whale_scanner_loop():
                         active_5m.append(m)
                 
                 print(f"[SCANNER] Found {len(active_5m)} active 5m markets to scan.", flush=True)
+                
+                # Update scanner state on each iteration
+                scanner_state["last_scan_time"] = int(time.time())
+                scanner_state["scanned_markets_count"] = len(active_5m)
+                scanner_state["approaching_whales"] = []
+                
                 for market in active_5m:
                     scan_market_for_whales(market)
             else:
