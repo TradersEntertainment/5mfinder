@@ -88,6 +88,26 @@ def remove_from_blacklist():
         return jsonify({"success": True})
     return jsonify({"success": True, "message": "Adres karalistede bulunamadı."})
 
+@app.route("/api/blacklist/add_via_link", methods=["GET"])
+def add_to_blacklist_via_link():
+    addr = request.args.get("address", "").strip().lower()
+    if not addr or not addr.startswith("0x") or len(addr) != 42:
+        return render_template("blacklist_confirm.html", success=False, error="Geçersiz cüzdan adresi.")
+        
+    blacklist = load_blacklist()
+    blacklist_lower = [a.lower() for a in blacklist]
+    
+    if addr not in blacklist_lower:
+        try:
+            checksum_addr = Web3.to_checksum_address(addr)
+            blacklist.append(checksum_addr)
+            save_blacklist(blacklist)
+            return render_template("blacklist_confirm.html", success=True, address=checksum_addr)
+        except Exception:
+            return render_template("blacklist_confirm.html", success=False, error="Geçersiz checksum formatı.")
+            
+    return render_template("blacklist_confirm.html", success=True, address=Web3.to_checksum_address(addr), message="Bu cüzdan adresi zaten karalistenizde bulunuyor.")
+
 # ----------------- BACKGROUND WHALE SCANNER SYSTEM STATE -----------------
 alerted_whales = set()
 
@@ -762,10 +782,7 @@ def send_telegram_whale_alert(address, shares, avg_price, market_title, market_s
                 f"📊 <b>Piyasa:</b> {market_title}\n"
                 f"👤 <b>Cüzdan Adresi:</b> <code>{address}</code>\n"
                 f"📈 <b>Zirve Pozisyon:</b> {shares:,.0f} Shares ({outcome})\n"
-                f"💰 <b>Tahmini Maliyet:</b> ${avg_price:.2f}\n\n"
-                f"🔗 <a href=\"https://polymarket.com/profile/{address}\">Polymarket Profili</a>\n"
-                f"🔗 <a href=\"https://www.betmoar.fun/profile/{address}\">Betmoar Profili</a>\n"
-                f"🔗 <a href=\"https://5mfinder-production.up.railway.app/\">5mFinder Analiz Et</a>\n"
+                f"💰 <b>Tahmini Maliyet:</b> ${avg_price:.2f}\n"
             )
         else:
             text = (
@@ -773,17 +790,30 @@ def send_telegram_whale_alert(address, shares, avg_price, market_title, market_s
                 f"📊 <b>Piyasa:</b> {market_title}\n"
                 f"👤 <b>Cüzdan Adresi:</b> <code>{address}</code>\n"
                 f"📈 <b>Zirve Pozisyon:</b> {shares:,.0f} Shares ({outcome})\n"
-                f"💰 <b>Tahmini Maliyet:</b> ${avg_price:.2f}\n\n"
-                f"🔗 <a href=\"https://polymarket.com/profile/{address}\">Polymarket Profili</a>\n"
-                f"🔗 <a href=\"https://www.betmoar.fun/profile/{address}\">Betmoar Profili</a>\n"
-                f"🔗 <a href=\"https://5mfinder-production.up.railway.app/\">5mFinder Analiz Et</a>\n"
+                f"💰 <b>Tahmini Maliyet:</b> ${avg_price:.2f}\n"
             )
+        
+        APP_URL = os.environ.get("APP_URL", "https://5mfinder-production.up.railway.app").rstrip("/")
+        
+        reply_markup = {
+            "inline_keyboard": [
+                [
+                    {"text": "👤 Polymarket", "url": f"https://polymarket.com/profile/{address}"},
+                    {"text": "🎮 Betmoar", "url": f"https://www.betmoar.fun/profile/{address}"}
+                ],
+                [
+                    {"text": "📊 5mFinder Analiz Et", "url": f"{APP_URL}/"},
+                    {"text": "🚫 Karalisteye Ekle", "url": f"{APP_URL}/api/blacklist/add_via_link?address={address}"}
+                ]
+            ]
+        }
         
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
         resp = requests.post(url, json={
             "chat_id": CHAT_ID,
             "text": text,
-            "parse_mode": "HTML"
+            "parse_mode": "HTML",
+            "reply_markup": reply_markup
         }, timeout=10)
         
         if resp.status_code == 200:
