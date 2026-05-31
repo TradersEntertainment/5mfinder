@@ -717,7 +717,7 @@ def check_if_new_account(address):
     # May 1, 2026 UTC timestamp = 1777593600
     MAY_1_2026 = 1777593600
     
-    url = f"https://data-api.polymarket.com/activity?user={address}&limit=1&offset=0"
+    url = f"https://data-api.polymarket.com/activity?user={address}&limit=1&sortDirection=ASC"
     try:
         resp = requests.get(url, timeout=5)
         if resp.status_code != 200:
@@ -726,50 +726,10 @@ def check_if_new_account(address):
         if not data:
             return False
         
-        newest_ts = data[0].get("timestamp")
-        if newest_ts < MAY_1_2026:
-            return False
+        oldest_ts = data[0].get("timestamp")
+        return oldest_ts is not None and oldest_ts >= MAY_1_2026
     except Exception:
         return False
-        
-    check_offsets = [100, 500, 1500, 3000]
-    for offset in check_offsets:
-        url = f"https://data-api.polymarket.com/activity?user={address}&limit=1&offset={offset}"
-        try:
-            resp = requests.get(url, timeout=5)
-            if resp.status_code == 200:
-                data = resp.json()
-                if data:
-                    ts = data[0].get("timestamp")
-                    if ts < MAY_1_2026:
-                        return False
-                else:
-                    break
-        except Exception:
-            pass
-            
-    low = 0
-    high = 4000
-    oldest_ts = newest_ts
-    
-    while low <= high:
-        mid = (low + high) // 2
-        url = f"https://data-api.polymarket.com/activity?user={address}&limit=1&offset={mid}"
-        try:
-            resp = requests.get(url, timeout=5)
-            if resp.status_code == 200:
-                data = resp.json()
-                if data and len(data) > 0:
-                    oldest_ts = data[0].get("timestamp")
-                    low = mid + 1
-                else:
-                    high = mid - 1
-            else:
-                break
-        except Exception:
-            break
-            
-    return oldest_ts is not None and oldest_ts >= MAY_1_2026
 
 def fetch_pusd_balance(address):
     try:
