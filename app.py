@@ -2,6 +2,7 @@ import os
 import re
 import time
 import requests
+import threading
 from flask import Flask, request, jsonify, render_template
 from web3 import Web3
 
@@ -597,6 +598,354 @@ def analyze():
         import traceback
         traceback.print_exc()
         return jsonify({"error": f"Beklenmedik bir sunucu hatası oluştu: {str(e)}"}), 200
+
+# ----------------- BACKGROUND WHALE SCANNER SYSTEM -----------------
+alerted_whales = set()
+
+def check_if_new_account(address):
+    # May 1, 2026 UTC timestamp = 1777593600
+    MAY_1_2026 = 1777593600
+    
+    url = f"https://data-api.polymarket.com/activity?user={address}&limit=1&offset=0"
+    try:
+        resp = requests.get(url, timeout=5)
+        if resp.status_code != 200:
+            return False
+        data = resp.json()
+        if not data:
+            return False
+        
+        newest_ts = data[0].get("timestamp")
+        if newest_ts < MAY_1_2026:
+            return False
+    except Exception:
+        return False
+        
+    check_offsets = [100, 500, 1500, 3000]
+    for offset in check_offsets:
+        url = f"https://data-api.polymarket.com/activity?user={address}&limit=1&offset={offset}"
+        try:
+            resp = requests.get(url, timeout=5)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data:
+                    ts = data[0].get("timestamp")
+                    if ts < MAY_1_2026:
+                        return False
+                else:
+                    break
+        except Exception:
+            pass
+            
+    low = 0
+    high = 4000
+    oldest_ts = newest_ts
+    
+    while low <= high:
+        mid = (low + high) // 2
+        url = f"https://data-api.polymarket.com/activity?user={address}&limit=1&offset={mid}"
+        try:
+            resp = requests.get(url, timeout=5)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data and len(data) > 0:
+                    oldest_ts = data[0].get("timestamp")
+                    low = mid + 1
+                else:
+                    high = mid - 1
+            else:
+                break
+        except Exception:
+            break
+            
+    return oldest_ts is not None and oldest_ts >= MAY_1_2026
+
+def send_telegram_whale_alert(address, shares, avg_price, market_title, market_slug, outcome):
+    try:
+        BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+        CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+        
+        if not BOT_TOKEN or not CHAT_ID:
+            print("[WARNING] TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID environment variables are not set. Skipping Telegram notification.", flush=True)
+            return
+        
+        # Check if user is a new account (Joined May or June 2026)
+        is_new = check_if_new_account(address)
+        
+        if is_new:
+            text = (
+                f"🚨 🐳 🆕 <b>5mFinder BALİNA ALARMI - YENİ HESAP!</b> 🆕 🐳 🚨\n\n"
+                f"🔥 <b>YENİ KULLANICI UYARISI! (Joined May/June 2026)</b> 🔥\n\n"
+                f"📊 <b>Piyasa:</b> {market_title}\n"
+                f"👤 <b>Cüzdan Adresi:</b> <code>{address}</code>\n"
+                f"📈 <b>Zirve Pozisyon:</b> {shares:,.0f} Shares ({outcome})\n"
+                f"💰 <b>Tahmini Maliyet:</b> ${avg_price:.2f}\n\n"
+                f"🔗 <a href=\"https://polymarket.com/profile/{address}\">Polymarket Profili</a>\n"
+                f"🔗 <a href=\"https://www.betmoar.fun/profile/{address}\">Betmoar Profili</a>\n"
+                f"🔗 <a href=\"https://5mfinder-production.up.railway.app/\">5mFinder Analiz Et</a>\n"
+            )
+        else:
+            text = (
+                f"🚨 🐳 <b>5mFinder BALİNA ALARMI (4K+ SHARES)</b> 🐳 🚨\n\n"
+                f"📊 <b>Piyasa:</b> {market_title}\n"
+                f"👤 <b>Cüzdan Adresi:</b> <code>{address}</code>\n"
+                f"📈 <b>Zirve Pozisyon:</b> {shares:,.0f} Shares ({outcome})\n"
+                f"💰 <b>Tahmini Maliyet:</b> ${avg_price:.2f}\n\n"
+                f"🔗 <a href=\"https://polymarket.com/profile/{address}\">Polymarket Profili</a>\n"
+                f"🔗 <a href=\"https://www.betmoar.fun/profile/{address}\">Betmoar Profili</a>\n"
+                f"🔗 <a href=\"https://5mfinder-production.up.railway.app/\">5mFinder Analiz Et</a>\n"
+            )
+        
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        resp = requests.post(url, json={
+            "chat_id": CHAT_ID,
+            "text": text,
+            "parse_mode": "HTML"
+        }, timeout=10)
+        
+        if resp.status_code == 200:
+            print(f"[SUCCESS] Whale Alert sent to Telegram for {address}", flush=True)
+        else:
+            print(f"[ERROR] TG Error: {resp.status_code}, {resp.text}", flush=True)
+    except Exception as e:
+        print(f"[ERROR] Failed to send TG alert: {e}", flush=True)
+
+def scan_market_for_whales(market):
+    try:
+        slug = market.get("slug")
+        title = market.get("question")
+        condition_id = market.get("conditionId")
+        clob_token_ids = market.get("clobTokenIds")
+        
+        if isinstance(clob_token_ids, str):
+            import json
+            try:
+                clob_token_ids = json.loads(clob_token_ids)
+            except Exception:
+                clob_token_ids = []
+                
+        outcomes = market.get("outcomes", "[]")
+        if isinstance(outcomes, str):
+            try:
+                outcomes = json.loads(outcomes)
+            except Exception:
+                outcomes = ["UP", "DOWN"]
+                
+        if not condition_id or len(clob_token_ids) < 2:
+            return
+            
+        up_token_dec = int(clob_token_ids[0])
+        down_token_dec = int(clob_token_ids[1])
+        up_token_hex = hex(up_token_dec)[2:].zfill(64).lower()
+        down_token_hex = hex(down_token_dec)[2:].zfill(64).lower()
+        
+        start_date_str = market.get("startDate")
+        end_date_str = market.get("endDate")
+        event_start_time_str = market.get("eventStartTime")
+        
+        from dateutil import parser
+        try:
+            if event_start_time_str:
+                start_ts = int(parser.isoparse(event_start_time_str).timestamp()) - 120
+            else:
+                start_ts = int(parser.isoparse(start_date_str).timestamp())
+        except Exception:
+            return
+            
+        end_ts = int(parser.isoparse(end_date_str).timestamp())
+        now_ts = int(time.time())
+        reference_end_ts = min(end_ts, now_ts)
+        
+        lookback_seconds = 12 * 60
+        effective_start_ts = max(start_ts, reference_end_ts - lookback_seconds)
+        
+        w3 = get_web3()
+        start_block = estimate_block_by_timestamp(w3, effective_start_ts)
+        
+        latest_block_data = w3.eth.get_block("latest")
+        latest_block = latest_block_data["number"]
+        
+        transfers_end_block = estimate_block_by_timestamp(w3, reference_end_ts + 60)
+        if transfers_end_block > latest_block:
+            transfers_end_block = latest_block
+            
+        if transfers_end_block <= start_block:
+            return
+            
+        transfer_single_topic0 = "0xc3d58168c5ae7397731d063d5bbf3d657854427343f4c083240f7aacaa2d0f62"
+        
+        chunks = []
+        chunk_size = 150
+        for chunk_start in range(start_block, transfers_end_block + 1, chunk_size):
+            chunk_end = min(chunk_start + chunk_size - 1, transfers_end_block)
+            chunks.append((chunk_start, chunk_end))
+            
+        logs = []
+        def fetch_chunk(cs, ce):
+            thread_w3 = get_web3()
+            return thread_w3.eth.get_logs({
+                "fromBlock": cs,
+                "toBlock": ce,
+                "address": CTF_ADDRESS,
+                "topics": [[transfer_single_topic0]]
+            })
+            
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            futures = {executor.submit(fetch_chunk, cs, ce): (cs, ce) for cs, ce in chunks}
+            for future in as_completed(futures):
+                try:
+                    logs.extend(future.result())
+                except Exception:
+                    pass
+                    
+        logs.sort(key=lambda x: (x.get("blockNumber", 0), x.get("logIndex", 0)))
+        
+        # Calculate winner/resolution status for average buy price estimation
+        is_resolved = False
+        winning_index = -1
+        try:
+            contract = w3.eth.contract(address=CTF_ADDRESS, abi=CTF_ABI)
+            payouts = [0, 0]
+            payouts[0] = contract.functions.payoutNumerators(condition_id, 0).call()
+            payouts[1] = contract.functions.payoutNumerators(condition_id, 1).call()
+            if payouts[0] > 0 or payouts[1] > 0:
+                is_resolved = True
+                winning_index = 0 if payouts[0] > payouts[1] else 1
+        except Exception:
+            pass
+            
+        balances = {}
+        max_balances = {}
+        buy_costs = {}
+        buy_shares = {}
+        
+        def update_balance(account, token_id, amount):
+            if account == "0x0000000000000000000000000000000000000000":
+                return
+            if account not in balances:
+                balances[account] = {up_token_dec: 0, down_token_dec: 0}
+            if account not in max_balances:
+                max_balances[account] = {up_token_dec: 0, down_token_dec: 0}
+                
+            balances[account][token_id] += amount
+            if balances[account][token_id] > max_balances[account][token_id]:
+                max_balances[account][token_id] = balances[account][token_id]
+                
+        for log in logs:
+            try:
+                data_hex = log["data"].hex() if isinstance(log["data"], bytes) else str(log["data"]).lower()
+                if data_hex.startswith("0x"): data_hex = data_hex[2:]
+                
+                tid_hex = data_hex[0:64]
+                if tid_hex in (up_token_hex, down_token_hex):
+                    t2 = log["topics"][2]
+                    t3 = log["topics"][3]
+                    t2_hex = t2.hex() if isinstance(t2, bytes) else str(t2)
+                    t3_hex = t3.hex() if isinstance(t3, bytes) else str(t3)
+                    if t2_hex.startswith("0x"): t2_hex = t2_hex[2:]
+                    if t3_hex.startswith("0x"): t3_hex = t3_hex[2:]
+                    frm = Web3.to_checksum_address("0x" + t2_hex[-40:])
+                    to = Web3.to_checksum_address("0x" + t3_hex[-40:])
+                    
+                    tid, val = w3.codec.decode(['uint256', 'uint256'], log["data"])
+                    block = log["blockNumber"]
+                    
+                    update_balance(frm, tid, -val)
+                    update_balance(to, tid, val)
+                    
+                    # Accumulate for average price
+                    if to != "0x0000000000000000000000000000000000000000":
+                        if to not in buy_costs:
+                            buy_costs[to] = {up_token_dec: 0.0, down_token_dec: 0.0}
+                            buy_shares[to] = {up_token_dec: 0.0, down_token_dec: 0.0}
+                            
+                        total_active_blocks = transfers_end_block - start_block
+                        if total_active_blocks > 0:
+                            progress = (block - start_block) / total_active_blocks
+                            progress = max(0.0, min(1.0, progress))
+                        else:
+                            progress = 0.5
+                            
+                        token_idx = 0 if tid == up_token_dec else 1
+                        if winning_index == -1:
+                            price = 0.50
+                        elif token_idx == winning_index:
+                            price = 0.50 + 0.45 * progress
+                        else:
+                            price = 0.50 - 0.45 * progress
+                            
+                        shares = val / 1e6
+                        cost = price * shares
+                        buy_costs[to][tid] += cost
+                        buy_shares[to][tid] += shares
+            except Exception:
+                pass
+                
+        EXCLUDED_ADDRESSES = {
+            "0xF3cFb6a6eBFeB51876289Eb235719EB1C65252B0".lower(),
+            "0x0000000000000000000000000000000000000000".lower()
+        }
+        
+        for account, max_vals in max_balances.items():
+            if account.lower() in EXCLUDED_ADDRESSES:
+                continue
+                
+            for tid, token_idx, name in [(up_token_dec, 0, outcomes[0] if len(outcomes) > 0 else "UP"), 
+                                         (down_token_dec, 1, outcomes[1] if len(outcomes) > 1 else "DOWN")]:
+                peak_shares = max_vals[tid] / 1e6
+                if peak_shares >= 4000.0:
+                    sh = buy_shares.get(account, {}).get(tid, 0.0)
+                    avg_price = buy_costs.get(account, {}).get(tid, 0.0) / sh if sh > 0 else 0.50
+                    
+                    # Applying filters: exclude bonder/settler (avg_price >= 0.96) or 100x chaser (avg_price <= 0.04)
+                    if avg_price <= 0.04 or avg_price >= 0.96:
+                        print(f"[FILTERED] Whale address {account} with peak {peak_shares:,.0f} {name} filtered due to average price ${avg_price:.2f}", flush=True)
+                        continue
+                        
+                    whale_key = f"{slug}:{account}:{name}"
+                    if whale_key not in alerted_whales:
+                        alerted_whales.add(whale_key)
+                        send_telegram_whale_alert(account, peak_shares, avg_price, title, slug, name)
+                        
+    except Exception as e:
+        print(f"[ERROR] Error scanning market {market.get('slug')}: {e}", flush=True)
+
+def whale_scanner_loop():
+    print("[INFO] Background Whale Scanner Thread Started.", flush=True)
+    while True:
+        try:
+            resp = requests.get("https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100", timeout=10)
+            if resp.status_code == 200:
+                markets = resp.json()
+                active_5m = []
+                for m in markets:
+                    slug = (m.get("slug") or "").lower()
+                    question = (m.get("question") or "").lower()
+                    if "5m" in slug or "5-minute" in slug or "5m" in question or "5-minute" in question:
+                        active_5m.append(m)
+                
+                print(f"[SCANNER] Found {len(active_5m)} active 5m markets to scan.", flush=True)
+                for market in active_5m:
+                    scan_market_for_whales(market)
+            else:
+                print(f"[SCANNER ERROR] Failed to fetch active markets: {resp.status_code}", flush=True)
+        except Exception as e:
+            print(f"[SCANNER ERROR] Exception in background loop: {e}", flush=True)
+            
+        time.sleep(60)
+
+def start_whale_scanner():
+    if os.environ.get("WHALE_SCANNER_STARTED") == "true":
+        return
+    os.environ["WHALE_SCANNER_STARTED"] = "true"
+    print("[INFO] Spawning background Whale Scanner thread...", flush=True)
+    scanner_thread = threading.Thread(target=whale_scanner_loop, daemon=True)
+    scanner_thread.start()
+
+# Start thread reliably when running in main app or when running under Gunicorn (which sets PORT environment variable)
+if __name__ == "__main__" or "PORT" in os.environ:
+    start_whale_scanner()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
