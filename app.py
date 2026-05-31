@@ -225,15 +225,19 @@ def analyze():
         else:
             lookback_seconds = 40 * 60
             
-        effective_start_ts = max(start_ts, end_ts - lookback_seconds)
-        print(f"[TRACE] Start TS: {start_ts}, End TS: {end_ts}, Effective Start TS: {effective_start_ts}")
+        now_ts = int(time.time())
+        # Use current time as upper reference if the market is ongoing/active
+        reference_end_ts = min(end_ts, now_ts)
+        
+        effective_start_ts = max(start_ts, reference_end_ts - lookback_seconds)
+        print(f"[TRACE] Start TS: {start_ts}, End TS: {end_ts}, Reference End TS: {reference_end_ts}, Effective Start TS: {effective_start_ts}")
         start_block = estimate_block_by_timestamp(w3, effective_start_ts)
         
         latest_block_data = w3.eth.get_block("latest")
         latest_block = latest_block_data["number"]
         
-        # For transfers, we only scan up to end_ts + 60
-        transfers_end_block = estimate_block_by_timestamp(w3, end_ts + 60)
+        # For transfers, we scan up to reference_end_ts + 60
+        transfers_end_block = estimate_block_by_timestamp(w3, reference_end_ts + 60)
         if transfers_end_block > latest_block:
             transfers_end_block = latest_block
             
@@ -547,7 +551,10 @@ def analyze():
         
         redeemers_list = []
         winning_token = up_token_dec if winning_index == 0 else down_token_dec
+        SYSTEM_ROUTER = "0xF3cFb6a6eBFeB51876289Eb235719EB1C65252B0"
         for acc, summary in redeemers_summary.items():
+            if acc.lower() == SYSTEM_ROUTER.lower():
+                continue
             if summary["total_payout"] > 0.01:
                 red_sh = buy_shares.get(acc, {}).get(winning_token, 0.0)
                 red_avg = buy_costs.get(acc, {}).get(winning_token, 0.0) / red_sh if red_sh > 0 else 0.50
