@@ -3,6 +3,7 @@ import re
 import time
 import requests
 import threading
+import json
 from flask import Flask, request, jsonify, render_template
 from web3 import Web3
 
@@ -23,6 +24,69 @@ except ImportError:
                 pass
 
 app = Flask(__name__)
+
+# ----------------- BLACKLIST MANAGEMENT SYSTEM -----------------
+BLACKLIST_FILE = "blacklist.json"
+
+def load_blacklist():
+    if not os.path.exists(BLACKLIST_FILE):
+        try:
+            with open(BLACKLIST_FILE, "w") as f:
+                json.dump([], f)
+        except Exception:
+            pass
+        return []
+    try:
+        with open(BLACKLIST_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+def save_blacklist(lst):
+    try:
+        with open(BLACKLIST_FILE, "w") as f:
+            json.dump(lst, f)
+    except Exception as e:
+        print(f"[ERROR] Failed to save blacklist: {e}", flush=True)
+
+@app.route("/api/blacklist", methods=["GET"])
+def get_blacklist():
+    return jsonify(load_blacklist())
+
+@app.route("/api/blacklist/add", methods=["POST"])
+def add_to_blacklist():
+    data = request.json or {}
+    addr = data.get("address", "").strip().lower()
+    if not addr or not addr.startswith("0x") or len(addr) != 42:
+        return jsonify({"error": "Geçersiz cüzdan adresi."}), 400
+    
+    blacklist = load_blacklist()
+    blacklist_lower = [a.lower() for a in blacklist]
+    
+    if addr not in blacklist_lower:
+        try:
+            checksum_addr = Web3.to_checksum_address(addr)
+            blacklist.append(checksum_addr)
+            save_blacklist(blacklist)
+            return jsonify({"success": True})
+        except Exception:
+            return jsonify({"error": "Geçersiz adresi checksum formatına çevirme hatası."}), 400
+    return jsonify({"success": True, "message": "Zaten karalistede."})
+
+@app.route("/api/blacklist/remove", methods=["POST"])
+def remove_from_blacklist():
+    data = request.json or {}
+    addr = data.get("address", "").strip().lower()
+    if not addr:
+        return jsonify({"error": "Geçersiz adres."}), 400
+        
+    blacklist = load_blacklist()
+    new_blacklist = [a for a in blacklist if a.lower() != addr]
+    
+    if len(new_blacklist) != len(blacklist):
+        save_blacklist(new_blacklist)
+        return jsonify({"success": True})
+    return jsonify({"success": True, "message": "Adres karalistede bulunamadı."})
 
 # List of high-performance public Polygon RPCs (ordered by getLogs compatibility)
 RPC_URLS = [
@@ -887,8 +951,12 @@ def scan_market_for_whales(market):
             "0x0000000000000000000000000000000000000000".lower()
         }
         
+        # Load blacklist
+        blacklist = load_blacklist()
+        blacklist_lower = {addr.lower() for addr in blacklist}
+        
         for account, max_vals in max_balances.items():
-            if account.lower() in EXCLUDED_ADDRESSES:
+            if account.lower() in EXCLUDED_ADDRESSES or account.lower() in blacklist_lower:
                 continue
                 
             for tid, token_idx, name in [(up_token_dec, 0, outcomes[0] if len(outcomes) > 0 else "UP"), 

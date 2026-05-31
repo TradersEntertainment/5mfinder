@@ -977,6 +977,38 @@
                 
             </section>
             
+            <!-- Blacklist Section (Siteden Karaliste Yönetimi) -->
+            <section class="glass-card" style="margin-top: 2rem; padding: 2rem; animation: fadeInUp 1s cubic-bezier(0.16, 1, 0.3, 1);">
+                <div class="column-header" style="border-bottom: 1px solid rgba(255, 255, 255, 0.08); padding-bottom: 1rem; margin-bottom: 1.5rem; display: flex; justify-content: space-between; align-items: center;">
+                    <div style="display: flex; align-items: center; gap: 0.6rem;">
+                        <i class="fa-solid fa-user-slash" style="color: var(--danger);"></i> 
+                        <span>Karaliste Yönetimi (Blacklist)</span>
+                    </div>
+                    <span style="font-size: 0.8rem; color: var(--text-secondary); font-weight: 500;">Karalisteye eklenen cüzdanlar balina bildirimlerinden elenir.</span>
+                </div>
+                
+                <div style="display: flex; gap: 1rem; margin-bottom: 1.5rem; background: rgba(255,255,255,0.02); padding: 0.4rem; border-radius: 14px; border: 1px solid rgba(255,255,255,0.05);">
+                    <input type="text" id="blacklistInput" style="flex: 1; background: transparent; border: none; outline: none; color: var(--text-primary); font-size: 0.95rem; padding: 0.6rem 1rem; font-family: monospace;" placeholder="0x ile başlayan cüzdan adresi girin..." autocomplete="off">
+                    <button id="btnAddToBlacklist" style="background: linear-gradient(135deg, var(--danger), #ff5252); color: white; border: none; outline: none; padding: 0.6rem 1.5rem; border-radius: 10px; font-weight: 700; font-size: 0.9rem; cursor: pointer; display: flex; align-items: center; gap: 0.5rem; box-shadow: 0 4px 12px rgba(255, 23, 68, 0.2); transition: all 0.3s ease;">
+                        <i class="fa-solid fa-plus"></i> Ekle
+                    </button>
+                </div>
+                
+                <div class="table-responsive" style="max-height: 250px; overflow-y: auto;">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Cüzdan Adresi</th>
+                                <th style="width: 100px; text-align: right;">Eylemler</th>
+                            </tr>
+                        </thead>
+                        <tbody id="blacklistTableBody">
+                            <!-- Dynamic blacklist rows -->
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+            
         </main>
         
     </div>
@@ -1196,6 +1228,90 @@
                 alert(err.message || 'Analiz sırasında beklenmeyen bir ağ hatası meydana geldi.');
             }
         });
+
+        // Blacklist Management Logic
+        const blacklistInput = document.getElementById('blacklistInput');
+        const btnAddToBlacklist = document.getElementById('btnAddToBlacklist');
+        const blacklistTableBody = document.getElementById('blacklistTableBody');
+        
+        async function loadBlacklist() {
+            try {
+                const response = await fetch('/api/blacklist');
+                const list = await response.json();
+                blacklistTableBody.innerHTML = '';
+                
+                if (list.length === 0) {
+                    blacklistTableBody.innerHTML = `<tr><td colspan="2"><div style="text-align: center; color: var(--text-secondary); padding: 1.5rem;"><i class="fa-solid fa-check-circle" style="color: var(--success); font-size: 1.2rem; margin-bottom: 0.5rem;"></i><br>Karaliste şu an boş.</div></td></tr>`;
+                } else {
+                    list.forEach(addr => {
+                        const tr = document.createElement('tr');
+                        tr.innerHTML = `
+                            <td style="font-family: monospace; font-size: 0.95rem; font-weight: 500;">
+                                <div style="display: flex; align-items: center; gap: 0.6rem;">
+                                    <a href="https://polymarket.com/profile/${addr}" target="_blank" class="address-link" title="Polymarket Profilini Görüntüle">${addr}</a>
+                                    <button class="copy-btn" onclick="copyText('${addr}', this)"><i class="fa-regular fa-copy"></i></button>
+                                </div>
+                            </td>
+                            <td style="text-align: right;">
+                                <button onclick="removeFromBlacklist('${addr}')" style="background: rgba(255, 23, 68, 0.08); border: 1px solid rgba(255, 23, 68, 0.2); color: var(--danger); padding: 0.4rem 0.8rem; border-radius: 8px; font-weight: 600; font-size: 0.8rem; cursor: pointer; transition: all 0.2s ease;">
+                                    <i class="fa-solid fa-trash-can"></i> Kaldır
+                                </button>
+                            </td>
+                        `;
+                        blacklistTableBody.appendChild(tr);
+                    });
+                }
+            } catch (err) {
+                console.error("Blacklist load error:", err);
+            }
+        }
+        
+        btnAddToBlacklist.addEventListener('click', async () => {
+            const addr = blacklistInput.value.trim().toLowerCase();
+            if (!addr || !addr.startsWith('0x') || addr.length !== 42) {
+                alert('Lütfen geçerli bir 0x cüzdan adresi girin (42 karakter).');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/blacklist/add', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ address: addr })
+                });
+                const res = await response.json();
+                if (response.ok && res.success) {
+                    blacklistInput.value = '';
+                    loadBlacklist();
+                } else {
+                    alert(res.error || 'Karalisteye ekleme yapılamadı.');
+                }
+            } catch (err) {
+                alert('Hata oluştu.');
+            }
+        });
+        
+        async function removeFromBlacklist(addr) {
+            if (!confirm(`${addr} adresini karalisteden çıkarmak istediğinize emin misiniz?`)) return;
+            try {
+                const response = await fetch('/api/blacklist/remove', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ address: addr })
+                });
+                const res = await response.json();
+                if (response.ok && res.success) {
+                    loadBlacklist();
+                } else {
+                    alert(res.error || 'Karalisteden çıkarma yapılamadı.');
+                }
+            } catch (err) {
+                alert('Hata oluştu.');
+            }
+        }
+        
+        // Initial load
+        loadBlacklist();
     </script>
 </body>
 </html>
