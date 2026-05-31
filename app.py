@@ -1063,35 +1063,61 @@ def scan_market_for_whales(market):
 
 def whale_scanner_loop():
     print("[INFO] Background Whale Scanner Thread Started.", flush=True)
+    from dateutil import parser
     while True:
         try:
             active_5m_map = {}
+            now_ts = int(time.time())
             
-            # 1. Fetch from 5M tag (tag_id=102892)
+            # 1. Fetch from 5M tag (tag_id=102892) sorted by endDate descending
             try:
-                tag_resp = requests.get("https://gamma-api.polymarket.com/markets?tag_id=102892&active=true&closed=false&limit=100", timeout=10)
+                tag_resp = requests.get("https://gamma-api.polymarket.com/markets?tag_id=102892&active=true&closed=false&limit=100&order=endDate&ascending=false", timeout=10)
                 if tag_resp.status_code == 200:
                     for m in tag_resp.json():
                         m_id = m.get("id")
                         slug = (m.get("slug") or "").lower()
                         question = (m.get("question") or "").lower()
-                        if "5m" in slug or "5-minute" in slug or "5m" in question or "5-minute" in question:
-                            if m_id:
-                                active_5m_map[m_id] = m
+                        end_date_str = m.get("endDate")
+                        
+                        if not end_date_str:
+                            continue
+                            
+                        try:
+                            end_ts = int(parser.isoparse(end_date_str).timestamp())
+                        except Exception:
+                            continue
+                            
+                        # Filter: Only keep markets that are active now (ends within 2 minutes in the past or up to 20 minutes in the future)
+                        if now_ts - 120 <= end_ts <= now_ts + 1200:
+                            if "5m" in slug or "5-minute" in slug or "5m" in question or "5-minute" in question:
+                                if m_id:
+                                    active_5m_map[m_id] = m
             except Exception as tag_err:
                 print(f"[SCANNER WARNING] Tag ID fetch failed: {tag_err}", flush=True)
                 
-            # 2. Fetch from general active markets (fallback)
+            # 2. Fetch from general active markets (fallback) sorted by endDate descending
             try:
-                gen_resp = requests.get("https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100", timeout=10)
+                gen_resp = requests.get("https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&order=endDate&ascending=false", timeout=10)
                 if gen_resp.status_code == 200:
                     for m in gen_resp.json():
                         m_id = m.get("id")
                         slug = (m.get("slug") or "").lower()
                         question = (m.get("question") or "").lower()
-                        if "5m" in slug or "5-minute" in slug or "5m" in question or "5-minute" in question:
-                            if m_id:
-                                active_5m_map[m_id] = m
+                        end_date_str = m.get("endDate")
+                        
+                        if not end_date_str:
+                            continue
+                            
+                        try:
+                            end_ts = int(parser.isoparse(end_date_str).timestamp())
+                        except Exception:
+                            continue
+                            
+                        # Filter: Only keep markets that are active now
+                        if now_ts - 120 <= end_ts <= now_ts + 1200:
+                            if "5m" in slug or "5-minute" in slug or "5m" in question or "5-minute" in question:
+                                if m_id:
+                                    active_5m_map[m_id] = m
             except Exception as gen_err:
                 print(f"[SCANNER WARNING] General active fetch failed: {gen_err}", flush=True)
                 
