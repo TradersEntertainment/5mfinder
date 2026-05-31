@@ -26,9 +26,17 @@ except ImportError:
 app = Flask(__name__)
 
 # ----------------- BLACKLIST MANAGEMENT SYSTEM -----------------
-BLACKLIST_FILE = "blacklist.json"
+BLACKLIST_FILE = os.environ.get("BLACKLIST_FILE", "blacklist.json")
 
 def load_blacklist():
+    # Automatically create parent directories if custom path is configured
+    parent_dir = os.path.dirname(BLACKLIST_FILE)
+    if parent_dir and not os.path.exists(parent_dir):
+        try:
+            os.makedirs(parent_dir, exist_ok=True)
+        except Exception:
+            pass
+
     if not os.path.exists(BLACKLIST_FILE):
         try:
             with open(BLACKLIST_FILE, "w") as f:
