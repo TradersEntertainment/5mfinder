@@ -1065,26 +1065,46 @@ def whale_scanner_loop():
     print("[INFO] Background Whale Scanner Thread Started.", flush=True)
     while True:
         try:
-            resp = requests.get("https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100", timeout=10)
-            if resp.status_code == 200:
-                markets = resp.json()
-                active_5m = []
-                for m in markets:
-                    slug = (m.get("slug") or "").lower()
-                    question = (m.get("question") or "").lower()
-                    if "5m" in slug or "5-minute" in slug or "5m" in question or "5-minute" in question:
-                        active_5m.append(m)
+            active_5m_map = {}
+            
+            # 1. Fetch from 5M tag (tag_id=102892)
+            try:
+                tag_resp = requests.get("https://gamma-api.polymarket.com/markets?tag_id=102892&active=true&closed=false&limit=100", timeout=10)
+                if tag_resp.status_code == 200:
+                    for m in tag_resp.json():
+                        m_id = m.get("id")
+                        slug = (m.get("slug") or "").lower()
+                        question = (m.get("question") or "").lower()
+                        if "5m" in slug or "5-minute" in slug or "5m" in question or "5-minute" in question:
+                            if m_id:
+                                active_5m_map[m_id] = m
+            except Exception as tag_err:
+                print(f"[SCANNER WARNING] Tag ID fetch failed: {tag_err}", flush=True)
                 
-                print(f"[SCANNER] Found {len(active_5m)} active 5m markets to scan.", flush=True)
+            # 2. Fetch from general active markets (fallback)
+            try:
+                gen_resp = requests.get("https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100", timeout=10)
+                if gen_resp.status_code == 200:
+                    for m in gen_resp.json():
+                        m_id = m.get("id")
+                        slug = (m.get("slug") or "").lower()
+                        question = (m.get("question") or "").lower()
+                        if "5m" in slug or "5-minute" in slug or "5m" in question or "5-minute" in question:
+                            if m_id:
+                                active_5m_map[m_id] = m
+            except Exception as gen_err:
+                print(f"[SCANNER WARNING] General active fetch failed: {gen_err}", flush=True)
                 
-                # Update scanner state on each iteration
-                scanner_state["last_scan_time"] = int(time.time())
-                scanner_state["scanned_markets_count"] = len(active_5m)
+            active_5m = list(active_5m_map.values())
+            print(f"[SCANNER] Found {len(active_5m)} active 5m markets to scan.", flush=True)
+            
+            # Update scanner state on each iteration
+            scanner_state["last_scan_time"] = int(time.time())
+            scanner_state["scanned_markets_count"] = len(active_5m)
+            
+            for market in active_5m:
+                scan_market_for_whales(market)
                 
-                for market in active_5m:
-                    scan_market_for_whales(market)
-            else:
-                print(f"[SCANNER ERROR] Failed to fetch active markets: {resp.status_code}", flush=True)
         except Exception as e:
             print(f"[SCANNER ERROR] Exception in background loop: {e}", flush=True)
             
