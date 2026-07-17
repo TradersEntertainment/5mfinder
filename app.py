@@ -1325,6 +1325,161 @@ def start_bnb_whale_scanner():
     bnb_thread = threading.Thread(target=bnb_whale_scanner_loop, daemon=True)
     bnb_thread.start()
 
+# ----------------- DEDICATED BTC ORDERBOOK WALL SCANNER SYSTEM -----------------
+alerted_orderbook_walls = set()
+
+def send_telegram_btc_orderbook_alert(coin_symbol, side_str, price, shares, outcome, market_title, market_slug):
+    try:
+        BOT_TOKEN = os.environ.get("BTC_ORDERBOOK_TELEGRAM_BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN")
+        CHAT_ID = os.environ.get("BTC_ORDERBOOK_TELEGRAM_CHAT_ID") or os.environ.get("ORDERBOOK_TELEGRAM_CHAT_ID") or os.environ.get("BNB_TELEGRAM_CHAT_ID") or os.environ.get("TELEGRAM_CHAT_ID")
+        
+        if not BOT_TOKEN or not CHAT_ID:
+            print("[WARNING] BTC Orderbook Telegram Bot Token or Chat ID not set. Skipping notification.", flush=True)
+            return
+            
+        usd_value = shares * price
+        side_emoji = "🟢" if "ALIŞ" in side_str or "BID" in side_str else "🔴"
+        
+        text = (
+            f"🚨 🧱 <b>5mFinder BTC ORDERBOOK LİMİT DUVARI ALARMI!</b> 🧱 🚨\n\n"
+            f"🔥 <b>TAHTADA DEV LİMİT EMİR DUVARI DETECTED!</b> 🔥\n\n"
+            f"📊 <b>Piyasa:</b> {market_title}\n"
+            f"🎯 <b>Taraf:</b> {side_emoji} <b>{side_str} DUVARI</b> ({outcome})\n"
+            f"💵 <b>Limit Fiyat:</b> ${price:.2f} ({int(round(price*100))}¢)\n"
+            f"📈 <b>Duvar Büyüklüğü:</b> {shares:,.0f} Shares (${usd_value:,.2f} USD Hacim)\n"
+        )
+        
+        APP_URL = os.environ.get("APP_URL", "https://5mfinder-production.up.railway.app").rstrip("/")
+        
+        reply_markup = {
+            "inline_keyboard": [
+                [
+                    {"text": "📊 5mFinder Analiz Et", "url": f"{APP_URL}/"},
+                    {"text": "🌐 Polymarket", "url": f"https://polymarket.com/event/{market_slug}"}
+                ]
+            ]
+        }
+        
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        resp = requests.post(url, json={
+            "chat_id": CHAT_ID,
+            "text": text,
+            "parse_mode": "HTML",
+            "reply_markup": reply_markup
+        }, timeout=10)
+        
+        if resp.status_code == 200:
+            print(f"[SUCCESS] BTC Orderbook Alert sent to TG ({side_str} {shares:,.0f} shares @ ${price:.2f})", flush=True)
+        else:
+            print(f"[ERROR] BTC Orderbook TG Error: {resp.status_code}, {resp.text}", flush=True)
+    except Exception as e:
+        print(f"[ERROR] Failed to send BTC Orderbook TG alert: {e}", flush=True)
+
+def scan_btc_orderbook_walls():
+    try:
+        now_ts = int(time.time())
+        current_interval = (now_ts // 300) * 300
+        intervals = [current_interval, current_interval + 300, current_interval + 600]
+        
+        threshold = float(os.environ.get("BTC_ORDERBOOK_WALL_THRESHOLD", 15000))
+        
+        for interval in intervals:
+            slug = f"btc-updown-5m-{interval}"
+            url = f"https://gamma-api.polymarket.com/markets?slug={slug}"
+            try:
+                r = requests.get(url, timeout=5)
+                if r.status_code != 200:
+                    continue
+                data = r.json()
+                if not data or not isinstance(data, list):
+                    continue
+                market = data[0]
+                cond_id = market.get("conditionId")
+                title = market.get("question") or f"Bitcoin Up or Down 5m-{interval}"
+                clob_ids = market.get("clobTokenIds", "[]")
+                if isinstance(clob_ids, str):
+                    try:
+                        clob_ids = json.loads(clob_ids)
+                    except Exception:
+                        clob_ids = []
+                outcomes = market.get("outcomes", ["UP", "DOWN"])
+                if isinstance(outcomes, str):
+                    try:
+                        outcomes = json.loads(outcomes)
+                    except Exception:
+                        outcomes = ["UP", "DOWN"]
+                        
+                if len(clob_ids) < 2:
+                    continue
+                    
+                for idx, token_id in enumerate(clob_ids[:2]):
+                    outcome_str = outcomes[idx] if idx < len(outcomes) else ("UP" if idx == 0 else "DOWN")
+                    book_url = f"https://clob.polymarket.com/book?token_id={token_id}"
+                    b_resp = requests.get(book_url, timeout=5)
+                    if b_resp.status_code != 200:
+                        continue
+                    book = b_resp.json()
+                    bids = book.get("bids", [])
+                    asks = book.get("asks", [])
+                    
+                    # Bids (Alışlar) - Exclude 0.01-0.05 bot liquidity
+                    for bid in bids:
+                        price = float(bid.get("price", 0))
+                        size = float(bid.get("size", 0))
+                        if 0.05 < price < 0.95 and size >= threshold:
+                            key = f"{slug}:{token_id}:BID:{price:.2f}:{int(size)}"
+                            if key not in alerted_orderbook_walls:
+                                alerted_orderbook_walls.add(key)
+                                send_telegram_btc_orderbook_alert(
+                                    coin_symbol="BTC",
+                                    side_str="ALIŞ (BID)",
+                                    price=price,
+                                    shares=size,
+                                    outcome=outcome_str,
+                                    market_title=title,
+                                    market_slug=slug
+                                )
+
+                    # Asks (Satışlar) - Exclude 0.95-0.99 bot liquidity
+                    for ask in asks:
+                        price = float(ask.get("price", 0))
+                        size = float(ask.get("size", 0))
+                        if 0.05 < price < 0.95 and size >= threshold:
+                            key = f"{slug}:{token_id}:ASK:{price:.2f}:{int(size)}"
+                            if key not in alerted_orderbook_walls:
+                                alerted_orderbook_walls.add(key)
+                                send_telegram_btc_orderbook_alert(
+                                    coin_symbol="BTC",
+                                    side_str="SATIŞ (ASK)",
+                                    price=price,
+                                    shares=size,
+                                    outcome=outcome_str,
+                                    market_title=title,
+                                    market_slug=slug
+                                )
+
+            except Exception as e:
+                print(f"[BTC ORDERBOOK SCANNER ERROR] Error scanning slug {slug}: {e}", flush=True)
+    except Exception as e:
+        print(f"[BTC ORDERBOOK SCANNER ERROR] Top-level error: {e}", flush=True)
+
+def btc_orderbook_scanner_loop():
+    print("[INFO] Background BTC Orderbook Scanner Thread Started.", flush=True)
+    while True:
+        try:
+            scan_btc_orderbook_walls()
+        except Exception as e:
+            print(f"[BTC ORDERBOOK SCANNER ERROR] Loop exception: {e}", flush=True)
+        time.sleep(15)
+
+def start_btc_orderbook_scanner():
+    if os.environ.get("BTC_ORDERBOOK_SCANNER_STARTED") == "true":
+        return
+    os.environ["BTC_ORDERBOOK_SCANNER_STARTED"] = "true"
+    print("[INFO] Spawning background BTC Orderbook Scanner thread...", flush=True)
+    btc_thread = threading.Thread(target=btc_orderbook_scanner_loop, daemon=True)
+    btc_thread.start()
+
 def start_whale_scanner():
     if os.environ.get("WHALE_SCANNER_STARTED") == "true":
         return
@@ -1333,6 +1488,7 @@ def start_whale_scanner():
     scanner_thread = threading.Thread(target=whale_scanner_loop, daemon=True)
     scanner_thread.start()
     start_bnb_whale_scanner()
+    start_btc_orderbook_scanner()
 
 # Start thread reliably when running in main app or when running under Gunicorn (which sets PORT environment variable)
 if __name__ == "__main__" or "PORT" in os.environ:
