@@ -1180,6 +1180,151 @@ def whale_scanner_loop():
             
         time.sleep(60)
 
+# ----------------- DEDICATED BNB TOP HOLDERS EARLY WHALE SCANNER SYSTEM -----------------
+alerted_bnb_whales = set()
+
+def send_telegram_bnb_whale_alert(address, shares, outcome, market_title, market_slug, holder_name=""):
+    try:
+        BOT_TOKEN = os.environ.get("BNB_TELEGRAM_BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN")
+        CHAT_ID = os.environ.get("BNB_TELEGRAM_CHAT_ID") or os.environ.get("TELEGRAM_CHAT_ID")
+        
+        if not BOT_TOKEN or not CHAT_ID:
+            print("[WARNING] BNB TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID environment variables are not set. Skipping Telegram notification.", flush=True)
+            return
+            
+        blacklist = load_blacklist()
+        if address.lower() in {a.lower() for a in blacklist}:
+            print(f"[FILTERED] BNB Whale address {address} is blacklisted. Skipping Telegram alert.", flush=True)
+            return
+            
+        balance = fetch_pusd_balance(address)
+        balance_text = f"💵 <b>Hesap Bakiyesi (pUSD):</b> ${balance:,.2f}\n" if balance is not None else ""
+        
+        display_name = f"<b>{holder_name}</b> (<code>{address}</code>)" if holder_name else f"<code>{address}</code>"
+        
+        text = (
+            f"🚨 🟡 <b>5mFinder BNB BALİNA & TOP HOLDER ALARMI!</b> 🟡 🚨\n\n"
+            f"🔥 <b>ERKEN BALİNA BİRİKİMİ DETECTED!</b> 🔥\n\n"
+            f"📊 <b>Piyasa:</b> {market_title}\n"
+            f"👤 <b>Cüzdan / Kullanıcı:</b> {display_name}\n"
+            f"📈 <b>Pozisyon:</b> {shares:,.0f} Shares ({outcome})\n"
+            f"{balance_text}"
+        )
+        
+        APP_URL = os.environ.get("APP_URL", "https://5mfinder-production.up.railway.app").rstrip("/")
+        
+        reply_markup = {
+            "inline_keyboard": [
+                [
+                    {"text": "👤 Polymarket", "url": f"https://polymarket.com/profile/{address}"},
+                    {"text": "🎮 Betmoar", "url": f"https://www.betmoar.fun/profile/{address}"}
+                ],
+                [
+                    {"text": "📊 5mFinder Analiz Et", "url": f"{APP_URL}/"},
+                    {"text": "🚫 Karalisteye Ekle", "url": f"{APP_URL}/api/blacklist/add_via_link?address={address}"}
+                ]
+            ]
+        }
+        
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        resp = requests.post(url, json={
+            "chat_id": CHAT_ID,
+            "text": text,
+            "parse_mode": "HTML",
+            "reply_markup": reply_markup
+        }, timeout=10)
+        
+        if resp.status_code == 200:
+            print(f"[SUCCESS] BNB Whale Alert sent to Telegram for {address} ({shares:,.0f} shares)", flush=True)
+        else:
+            print(f"[ERROR] BNB TG Error: {resp.status_code}, {resp.text}", flush=True)
+    except Exception as e:
+        print(f"[ERROR] Failed to send BNB TG alert: {e}", flush=True)
+
+def scan_bnb_top_holders():
+    try:
+        now_ts = int(time.time())
+        current_interval = (now_ts // 300) * 300
+        intervals = [current_interval, current_interval + 300, current_interval + 600]
+        
+        threshold = float(os.environ.get("BNB_WHALE_THRESHOLD", 15000))
+        
+        for interval in intervals:
+            slug = f"bnb-updown-5m-{interval}"
+            url = f"https://gamma-api.polymarket.com/markets?slug={slug}"
+            try:
+                resp = requests.get(url, timeout=5)
+                if resp.status_code != 200:
+                    continue
+                data = resp.json()
+                if not data or not isinstance(data, list):
+                    continue
+                market = data[0]
+                cond_id = market.get("conditionId")
+                title = market.get("question") or f"BNB Up or Down 5m-{interval}"
+                outcomes = market.get("outcomes", ["UP", "DOWN"])
+                if isinstance(outcomes, str):
+                    try:
+                        outcomes = json.loads(outcomes)
+                    except Exception:
+                        outcomes = ["UP", "DOWN"]
+                        
+                if not cond_id:
+                    continue
+                    
+                holders_url = f"https://data-api.polymarket.com/holders?market={cond_id}"
+                h_resp = requests.get(holders_url, timeout=5)
+                if h_resp.status_code != 200:
+                    continue
+                holders_data = h_resp.json()
+                if not holders_data or not isinstance(holders_data, list):
+                    continue
+                    
+                for token_group in holders_data:
+                    holders_list = token_group.get("holders", [])
+                    for h in holders_list:
+                        wallet = h.get("proxyWallet")
+                        if not wallet:
+                            continue
+                        amount = float(h.get("amount") or 0)
+                        name = h.get("name") or h.get("pseudonym") or ""
+                        idx = h.get("outcomeIndex", 0)
+                        outcome_str = outcomes[idx] if idx < len(outcomes) else ("UP" if idx == 0 else "DOWN")
+                        
+                        if amount >= threshold:
+                            whale_key = f"{slug}:{wallet.lower()}:{outcome_str.lower()}"
+                            if whale_key not in alerted_bnb_whales:
+                                alerted_bnb_whales.add(whale_key)
+                                send_telegram_bnb_whale_alert(
+                                    address=wallet,
+                                    shares=amount,
+                                    outcome=outcome_str,
+                                    market_title=title,
+                                    market_slug=slug,
+                                    holder_name=name
+                                )
+            except Exception as e:
+                print(f"[BNB SCANNER ERROR] Error scanning slug {slug}: {e}", flush=True)
+    except Exception as e:
+        print(f"[BNB SCANNER ERROR] Top-level error in scan_bnb_top_holders: {e}", flush=True)
+
+def bnb_whale_scanner_loop():
+    print("[INFO] Background BNB Whale Scanner Thread Started.", flush=True)
+    while True:
+        try:
+            scan_bnb_top_holders()
+        except Exception as e:
+            print(f"[BNB SCANNER ERROR] Loop exception: {e}", flush=True)
+        time.sleep(20)
+
+def start_bnb_whale_scanner():
+    if os.environ.get("BNB_SCANNER_STARTED") == "true":
+        return
+    os.environ["BNB_SCANNER_STARTED"] = "true"
+    print("[INFO] Spawning background BNB Whale Scanner thread...", flush=True)
+    bnb_thread = threading.Thread(target=bnb_whale_scanner_loop, daemon=True)
+    bnb_thread.start()
+
 def start_whale_scanner():
     if os.environ.get("WHALE_SCANNER_STARTED") == "true":
         return
@@ -1187,6 +1332,7 @@ def start_whale_scanner():
     print("[INFO] Spawning background Whale Scanner thread...", flush=True)
     scanner_thread = threading.Thread(target=whale_scanner_loop, daemon=True)
     scanner_thread.start()
+    start_bnb_whale_scanner()
 
 # Start thread reliably when running in main app or when running under Gunicorn (which sets PORT environment variable)
 if __name__ == "__main__" or "PORT" in os.environ:
