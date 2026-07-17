@@ -1364,13 +1364,13 @@ def scan_bnb_top_holders():
         print(f"[BNB SCANNER ERROR] Top-level error in scan_bnb_top_holders: {e}", flush=True)
 
 def bnb_whale_scanner_loop():
-    print("[INFO] Background BNB Whale Scanner Thread Started.", flush=True)
+    print("[INFO] Background BNB Whale Scanner Thread Started (10s High Speed Cycle).", flush=True)
     while True:
         try:
             scan_bnb_top_holders()
         except Exception as e:
             print(f"[BNB SCANNER ERROR] Loop exception: {e}", flush=True)
-        time.sleep(20)
+        time.sleep(10)
 
 def start_bnb_whale_scanner():
     if os.environ.get("BNB_SCANNER_STARTED") == "true":
@@ -1519,13 +1519,13 @@ def scan_btc_orderbook_walls():
         print(f"[BTC ORDERBOOK SCANNER ERROR] Top-level error: {e}", flush=True)
 
 def btc_orderbook_scanner_loop():
-    print("[INFO] Background BTC Orderbook Scanner Thread Started.", flush=True)
+    print("[INFO] Background BTC Orderbook Scanner Thread Started (10s High Speed Cycle).", flush=True)
     while True:
         try:
             scan_btc_orderbook_walls()
         except Exception as e:
             print(f"[BTC ORDERBOOK SCANNER ERROR] Loop exception: {e}", flush=True)
-        time.sleep(15)
+        time.sleep(10)
 
 def start_btc_orderbook_scanner():
     if os.environ.get("BTC_ORDERBOOK_SCANNER_STARTED") == "true":
