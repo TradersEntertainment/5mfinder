@@ -1183,7 +1183,7 @@ def whale_scanner_loop():
 # ----------------- DEDICATED BNB TOP HOLDERS EARLY WHALE SCANNER SYSTEM -----------------
 alerted_bnb_whales = set()
 
-def send_telegram_bnb_whale_alert(address, shares, outcome, market_title, market_slug, holder_name=""):
+def send_telegram_bnb_whale_alert(up_holder=None, down_holder=None, market_title="", market_slug=""):
     try:
         BOT_TOKEN = os.environ.get("BNB_TELEGRAM_BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN")
         CHAT_ID = os.environ.get("BNB_TELEGRAM_CHAT_ID") or os.environ.get("TELEGRAM_CHAT_ID")
@@ -1193,35 +1193,73 @@ def send_telegram_bnb_whale_alert(address, shares, outcome, market_title, market
             return
             
         blacklist = load_blacklist()
-        if address.lower() in {a.lower() for a in blacklist}:
-            print(f"[FILTERED] BNB Whale address {address} is blacklisted. Skipping Telegram alert.", flush=True)
-            return
+        blacklist_lower = {a.lower() for a in blacklist}
+        
+        # Filter blacklisted addresses
+        if up_holder and up_holder["address"].lower() in blacklist_lower:
+            up_holder = None
+        if down_holder and down_holder["address"].lower() in blacklist_lower:
+            down_holder = None
             
-        balance = fetch_pusd_balance(address)
-        balance_text = f"💵 <b>Hesap Bakiyesi (pUSD):</b> ${balance:,.2f}\n" if balance is not None else ""
-        
-        display_name = f"<b>{holder_name}</b> (<code>{address}</code>)" if holder_name else f"<code>{address}</code>"
-        
-        text = (
-            f"🚨 🟡 <b>5mFinder BNB BALİNA & TOP HOLDER ALARMI!</b> 🟡 🚨\n\n"
-            f"🔥 <b>ERKEN BALİNA BİRİKİMİ DETECTED!</b> 🔥\n\n"
+        if not up_holder and not down_holder:
+            return
+
+        lines = [
+            "🚨 🟡 <b>5mFinder BNB BALİNA VE TOP HOLDER ALARMI!</b> 🟡 🚨\n",
+            "🔥 <b>ERKEN BALİNA BİRİKİMİ DETECTED!</b> 🔥\n",
             f"📊 <b>Piyasa:</b> {market_title}\n"
-            f"👤 <b>Cüzdan / Kullanıcı:</b> {display_name}\n"
-            f"📈 <b>Pozisyon:</b> {shares:,.0f} Shares ({outcome})\n"
-            f"{balance_text}"
-        )
+        ]
+        
+        total_shares = 0.0
+        primary_addr = None
+        
+        if up_holder:
+            addr = up_holder["address"]
+            primary_addr = addr
+            name = up_holder.get("name") or addr[:8]
+            shares = up_holder["shares"]
+            bal = fetch_pusd_balance(addr)
+            total_shares += shares
+            bal_str = f"${bal:,.2f}" if bal is not None else "Bilinmiyor"
+            
+            poly_link = f'<a href="https://polymarket.com/profile/{addr}">{name}</a>'
+            betmoar_link = f'<a href="https://www.betmoar.fun/profile/{addr}">🎮 Betmoar Profili</a>'
+            
+            lines.append(f"🟢 <b>UP BALİNASI:</b> {poly_link} ({betmoar_link})")
+            lines.append(f"   👤 <code>{addr}</code>")
+            lines.append(f"   📈 <b>Pozisyon:</b> {shares:,.0f} Shares (UP)")
+            lines.append(f"   💵 <b>Cüzdan Bakiyesi (pUSD):</b> {bal_str}\n")
+            
+        if down_holder:
+            addr = down_holder["address"]
+            if not primary_addr:
+                primary_addr = addr
+            name = down_holder.get("name") or addr[:8]
+            shares = down_holder["shares"]
+            bal = fetch_pusd_balance(addr)
+            total_shares += shares
+            bal_str = f"${bal:,.2f}" if bal is not None else "Bilinmiyor"
+            
+            poly_link = f'<a href="https://polymarket.com/profile/{addr}">{name}</a>'
+            betmoar_link = f'<a href="https://www.betmoar.fun/profile/{addr}">🎮 Betmoar Profili</a>'
+            
+            lines.append(f"🔴 <b>DOWN BALİNASI:</b> {poly_link} ({betmoar_link})")
+            lines.append(f"   👤 <code>{addr}</code>")
+            lines.append(f"   📈 <b>Pozisyon:</b> {shares:,.0f} Shares (DOWN)")
+            lines.append(f"   💵 <b>Cüzdan Bakiyesi (pUSD):</b> {bal_str}\n")
+            
+        if up_holder and down_holder:
+            lines.append(f"⚔️ <b>TOPLAM SAVAŞ HACMİ:</b> {total_shares:,.0f} Shares")
+            
+        text = "\n".join(lines)
         
         APP_URL = os.environ.get("APP_URL", "https://5mfinder-production.up.railway.app").rstrip("/")
         
         reply_markup = {
             "inline_keyboard": [
                 [
-                    {"text": "👤 Polymarket", "url": f"https://polymarket.com/profile/{address}"},
-                    {"text": "🎮 Betmoar", "url": f"https://www.betmoar.fun/profile/{address}"}
-                ],
-                [
                     {"text": "📊 5mFinder Analiz Et", "url": f"{APP_URL}/"},
-                    {"text": "🚫 Karalisteye Ekle", "url": f"{APP_URL}/api/blacklist/add_via_link?address={address}"}
+                    {"text": "🚫 Karalisteye Ekle", "url": f"{APP_URL}/api/blacklist/add_via_link?address={primary_addr}"}
                 ]
             ]
         }
@@ -1231,11 +1269,12 @@ def send_telegram_bnb_whale_alert(address, shares, outcome, market_title, market
             "chat_id": CHAT_ID,
             "text": text,
             "parse_mode": "HTML",
-            "reply_markup": reply_markup
+            "reply_markup": reply_markup,
+            "disable_web_page_preview": True
         }, timeout=10)
         
         if resp.status_code == 200:
-            print(f"[SUCCESS] BNB Whale Alert sent to Telegram for {address} ({shares:,.0f} shares)", flush=True)
+            print(f"[SUCCESS] BNB Dual Whale Alert sent to Telegram for {market_slug}", flush=True)
         else:
             print(f"[ERROR] BNB TG Error: {resp.status_code}, {resp.text}", flush=True)
     except Exception as e:
@@ -1280,6 +1319,9 @@ def scan_bnb_top_holders():
                 if not holders_data or not isinstance(holders_data, list):
                     continue
                     
+                up_top = None
+                down_top = None
+                
                 for token_group in holders_data:
                     holders_list = token_group.get("holders", [])
                     for h in holders_list:
@@ -1289,20 +1331,33 @@ def scan_bnb_top_holders():
                         amount = float(h.get("amount") or 0)
                         name = h.get("name") or h.get("pseudonym") or ""
                         idx = h.get("outcomeIndex", 0)
-                        outcome_str = outcomes[idx] if idx < len(outcomes) else ("UP" if idx == 0 else "DOWN")
                         
-                        if amount >= threshold:
-                            whale_key = f"{slug}:{wallet.lower()}:{outcome_str.lower()}"
-                            if whale_key not in alerted_bnb_whales:
-                                alerted_bnb_whales.add(whale_key)
-                                send_telegram_bnb_whale_alert(
-                                    address=wallet,
-                                    shares=amount,
-                                    outcome=outcome_str,
-                                    market_title=title,
-                                    market_slug=slug,
-                                    holder_name=name
-                                )
+                        holder_obj = {
+                            "address": wallet,
+                            "name": name,
+                            "shares": amount
+                        }
+                        
+                        if idx == 0 and amount >= threshold:
+                            if not up_top or amount > up_top["shares"]:
+                                up_top = holder_obj
+                        elif idx == 1 and amount >= threshold:
+                            if not down_top or amount > down_top["shares"]:
+                                down_top = holder_obj
+                                
+                if up_top or down_top:
+                    up_key = f"{up_top['address'].lower()}" if up_top else "none"
+                    down_key = f"{down_top['address'].lower()}" if down_top else "none"
+                    whale_key = f"{slug}:{up_key}:{down_key}"
+                    
+                    if whale_key not in alerted_bnb_whales:
+                        alerted_bnb_whales.add(whale_key)
+                        send_telegram_bnb_whale_alert(
+                            up_holder=up_top,
+                            down_holder=down_top,
+                            market_title=title,
+                            market_slug=slug
+                        )
             except Exception as e:
                 print(f"[BNB SCANNER ERROR] Error scanning slug {slug}: {e}", flush=True)
     except Exception as e:
