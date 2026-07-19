@@ -1570,7 +1570,7 @@ def get_pyth_prices(feed_id, start_ts):
     except Exception:
         return None, None
 
-def send_telegram_manipulation_alert(coin_symbol, anomaly_type, start_spot, live_spot, up_price, down_price, market_title, market_slug, remaining_seconds):
+def send_telegram_manipulation_alert(coin_symbol, anomaly_type, start_spot, live_spot, up_price, down_price, market_title, market_slug, remaining_seconds, condition_id=None):
     try:
         BOT_TOKEN = os.environ.get("MANIPULATION_TELEGRAM_BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN")
         CHAT_ID = os.environ.get("MANIPULATION_TELEGRAM_CHAT_ID") or os.environ.get("MANIPULATION_CHAT_ID") or os.environ.get("TELEGRAM_CHAT_ID")
@@ -1587,36 +1587,87 @@ def send_telegram_manipulation_alert(coin_symbol, anomaly_type, start_spot, live
         rem_min = remaining_seconds // 60
         rem_sec = remaining_seconds % 60
         
-        favored_dir = anomaly_type.split()[2] if len(anomaly_type.split()) >= 3 else "UP"
+        favored_dir = "UP" if "PUMP" in anomaly_type else "DOWN"
+        favored_idx = 0 if favored_dir == "UP" else 1
         
+        # Fetch Top Buying Holders Cluster if condition_id is provided
+        holders_section = ""
+        primary_addr = None
+        
+        if condition_id:
+            try:
+                holders_url = f"https://data-api.polymarket.com/holders?market={condition_id}"
+                h_resp = requests.get(holders_url, timeout=4)
+                if h_resp.status_code == 200 and h_resp.json():
+                    holders_data = h_resp.json()
+                    target_holders = []
+                    
+                    for token_group in holders_data:
+                        idx = token_group.get("outcomeIndex", 0)
+                        if idx == favored_idx:
+                            target_holders = token_group.get("holders", [])
+                            break
+                            
+                    if target_holders:
+                        total_wallet_count = len(target_holders)
+                        total_cluster_shares = sum(float(h.get("amount") or 0) for h in target_holders)
+                        
+                        holder_lines = [f"👥 <b>ÇOKLU CÜZDAN / BOT AĞI DETAYI ({total_wallet_count} Cüzdan):</b>"]
+                        
+                        for i, h in enumerate(target_holders[:5]):
+                            w = h.get("proxyWallet")
+                            if not w:
+                                continue
+                            if not primary_addr:
+                                primary_addr = w
+                            amt = float(h.get("amount") or 0)
+                            name = h.get("name") or h.get("pseudonym") or f"{w[:6]}...{w[-4:]}"
+                            
+                            poly_link = f'<a href="https://polymarket.com/profile/{w}">{name}</a>'
+                            betmoar_link = f'<a href="https://www.betmoar.fun/profile/{w}">🎮 Betmoar</a>'
+                            
+                            holder_lines.append(f"   {i+1}. {poly_link} ({betmoar_link}): <b>{amt:,.0f} Shares</b>")
+                            
+                        if total_wallet_count > 5:
+                            holder_lines.append(f"   <i>...ve {total_wallet_count - 5} diğer cüzdan</i>")
+                            
+                        holder_lines.append(f"📦 <b>Toplam Küme Hacmi ({favored_dir}):</b> {total_cluster_shares:,.0f} Shares\n")
+                        holders_section = "\n".join(holder_lines) + "\n"
+            except Exception as ex:
+                print(f"[MANIPULATION HOLDERS ERROR] {ex}", flush=True)
+
         text = (
-            f"🚨 🎯 <b>5mFinder MANİPÜLASYON & PUMP/DUMP ALARMI!</b> 🎯 🚨\n\n"
+            f"🚨 🎯 <b>5mFinder MANİPÜLASYON & ÇOKLU CÜZDAN ALARMI!</b> 🎯 🚨\n\n"
             f"🔥 <b>{type_emoji} {anomaly_type} DETECTED!</b> 🔥\n\n"
             f"📊 <b>Piyasa:</b> {market_title}\n"
             f"⏳ <b>Kalan Süre:</b> {rem_min}dk {rem_sec}sn\n\n"
             f"🎯 <b>Price To Beat (Hedef):</b> ${start_spot:,.2f}\n"
             f"💵 <b>Current Price (Canlı Spot):</b> ${live_spot:,.2f} (Fark: ${spot_diff:+.2f} -> Spot: {spot_status_str})\n\n"
             f"📈 <b>Polymarket Tahtası:</b> UP <b>{int(round(up_price*100))}¢</b> | DOWN <b>{int(round(down_price*100))}¢</b>\n\n"
+            f"{holders_section}"
             f"⚠️ <b>SİNYAL:</b> Canlı spot fiyat {spot_status_str} bölgesinde olmasına rağmen tahta {favored_dir} yönüne fiyatlanıyor! Son dakika manipülasyonu bekleniyor!"
         )
         
         APP_URL = os.environ.get("APP_URL", "https://5mfinder-production.up.railway.app").rstrip("/")
         
-        reply_markup = {
-            "inline_keyboard": [
-                [
-                    {"text": "📊 5mFinder Analiz Et", "url": f"{APP_URL}/"},
-                    {"text": "🌐 Polymarket", "url": f"https://polymarket.com/event/{market_slug}"}
-                ]
-            ]
-        }
+        btn_row = [
+            {"text": "📊 5mFinder Analiz Et", "url": f"{APP_URL}/"},
+            {"text": "🌐 Polymarket", "url": f"https://polymarket.com/event/{market_slug}"}
+        ]
+        
+        reply_markup = {"inline_keyboard": [btn_row]}
+        if primary_addr:
+            reply_markup["inline_keyboard"].append([
+                {"text": "🚫 Karalisteye Ekle", "url": f"{APP_URL}/api/blacklist/add_via_link?address={primary_addr}"}
+            ])
         
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
         resp = requests.post(url, json={
             "chat_id": CHAT_ID,
             "text": text,
             "parse_mode": "HTML",
-            "reply_markup": reply_markup
+            "reply_markup": reply_markup,
+            "disable_web_page_preview": True
         }, timeout=10)
         
         if resp.status_code == 200:
@@ -1722,8 +1773,13 @@ def scan_spot_manipulation_anomalies():
                             down_price=down_price,
                             market_title=title,
                             market_slug=slug,
-                            remaining_seconds=remaining_seconds
+                            remaining_seconds=remaining_seconds,
+                            condition_id=cond_id
                         )
+            except Exception as e:
+                print(f"[MANIPULATION SCANNER ERROR] Error checking {slug}: {e}", flush=True)
+    except Exception as e:
+        print(f"[MANIPULATION SCANNER ERROR] Top-level error: {e}", flush=True)
             except Exception as e:
                 print(f"[MANIPULATION SCANNER ERROR] Error checking {slug}: {e}", flush=True)
     except Exception as e:
