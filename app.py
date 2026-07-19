@@ -1535,6 +1535,213 @@ def start_btc_orderbook_scanner():
     btc_thread = threading.Thread(target=btc_orderbook_scanner_loop, daemon=True)
     btc_thread.start()
 
+# ----------------- SPOT VS MARKET ODDS MANIPULATION DETECTOR SYSTEM -----------------
+alerted_manipulation_events = set()
+
+pyth_feed_ids = {
+    "btc": "e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43",
+    "eth": "ff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fc0ace",
+    "sol": "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d",
+    "bnb": "2f958174490c92e1f4a9e6a239e03c026b2b8539096db37603f9050d2e825026",
+    "xrp": "ec5d2050841d9550325c851681a9ad2630079e14e76865657198852e26aa4d70"
+}
+
+def get_pyth_prices(feed_id, start_ts):
+    try:
+        live_url = f"https://hermes.pyth.network/v2/updates/price/latest?ids[]={feed_id}"
+        r_live = requests.get(live_url, timeout=3)
+        live_price = None
+        if r_live.status_code == 200:
+            parsed = r_live.json().get("parsed", [])
+            if parsed:
+                p_obj = parsed[0].get("price", {})
+                live_price = int(p_obj.get("price", 0)) * (10 ** int(p_obj.get("expo", 0)))
+                
+        hist_url = f"https://hermes.pyth.network/v2/updates/price/{start_ts}?ids[]={feed_id}"
+        r_hist = requests.get(hist_url, timeout=3)
+        start_price = None
+        if r_hist.status_code == 200:
+            parsed = r_hist.json().get("parsed", [])
+            if parsed:
+                p_obj = parsed[0].get("price", {})
+                start_price = int(p_obj.get("price", 0)) * (10 ** int(p_obj.get("expo", 0)))
+                
+        return start_price, live_price
+    except Exception:
+        return None, None
+
+def send_telegram_manipulation_alert(coin_symbol, anomaly_type, start_spot, live_spot, up_price, down_price, market_title, market_slug, remaining_seconds):
+    try:
+        BOT_TOKEN = os.environ.get("MANIPULATION_TELEGRAM_BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN")
+        CHAT_ID = os.environ.get("MANIPULATION_TELEGRAM_CHAT_ID") or os.environ.get("MANIPULATION_CHAT_ID") or os.environ.get("TELEGRAM_CHAT_ID")
+        
+        if not BOT_TOKEN or not CHAT_ID:
+            print("[WARNING] Manipulation Telegram Bot Token or Chat ID not set. Skipping notification.", flush=True)
+            return
+            
+        spot_diff = live_spot - start_spot
+        spot_status_str = "UP" if spot_diff >= 0 else "DOWN"
+        
+        type_emoji = "🚀" if "PUMP" in anomaly_type else "📉"
+        
+        rem_min = remaining_seconds // 60
+        rem_sec = remaining_seconds % 60
+        
+        favored_dir = anomaly_type.split()[2] if len(anomaly_type.split()) >= 3 else "UP"
+        
+        text = (
+            f"🚨 🎯 <b>5mFinder MANİPÜLASYON & PUMP/DUMP ALARMI!</b> 🎯 🚨\n\n"
+            f"🔥 <b>{type_emoji} {anomaly_type} DETECTED!</b> 🔥\n\n"
+            f"📊 <b>Piyasa:</b> {market_title}\n"
+            f"⏳ <b>Kalan Süre:</b> {rem_min}dk {rem_sec}sn\n\n"
+            f"🎯 <b>Price To Beat (Hedef):</b> ${start_spot:,.2f}\n"
+            f"💵 <b>Current Price (Canlı Spot):</b> ${live_spot:,.2f} (Fark: ${spot_diff:+.2f} -> Spot: {spot_status_str})\n\n"
+            f"📈 <b>Polymarket Tahtası:</b> UP <b>{int(round(up_price*100))}¢</b> | DOWN <b>{int(round(down_price*100))}¢</b>\n\n"
+            f"⚠️ <b>SİNYAL:</b> Canlı spot fiyat {spot_status_str} bölgesinde olmasına rağmen tahta {favored_dir} yönüne fiyatlanıyor! Son dakika manipülasyonu bekleniyor!"
+        )
+        
+        APP_URL = os.environ.get("APP_URL", "https://5mfinder-production.up.railway.app").rstrip("/")
+        
+        reply_markup = {
+            "inline_keyboard": [
+                [
+                    {"text": "📊 5mFinder Analiz Et", "url": f"{APP_URL}/"},
+                    {"text": "🌐 Polymarket", "url": f"https://polymarket.com/event/{market_slug}"}
+                ]
+            ]
+        }
+        
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        resp = requests.post(url, json={
+            "chat_id": CHAT_ID,
+            "text": text,
+            "parse_mode": "HTML",
+            "reply_markup": reply_markup
+        }, timeout=10)
+        
+        if resp.status_code == 200:
+            print(f"[SUCCESS] Manipulation Alert sent to TG for {market_slug}", flush=True)
+        else:
+            print(f"[ERROR] Manipulation TG Error: {resp.status_code}, {resp.text}", flush=True)
+    except Exception as e:
+        print(f"[ERROR] Failed to send Manipulation TG alert: {e}", flush=True)
+
+def scan_spot_manipulation_anomalies():
+    try:
+        now_ts = int(time.time())
+        current_interval = (now_ts // 300) * 300
+        
+        coins = ["btc", "eth", "sol", "bnb", "xrp"]
+        
+        for coin in coins:
+            slug = f"{coin}-updown-5m-{current_interval}"
+            url = f"https://gamma-api.polymarket.com/markets?slug={slug}"
+            try:
+                r = requests.get(url, timeout=4)
+                if r.status_code != 200:
+                    continue
+                data = r.json()
+                if not data or not isinstance(data, list):
+                    continue
+                market = data[0]
+                cond_id = market.get("conditionId")
+                title = market.get("question") or f"{coin.upper()} Up or Down 5m"
+                end_date_str = market.get("endDate")
+                clob_ids = market.get("clobTokenIds", "[]")
+                if isinstance(clob_ids, str):
+                    try:
+                        clob_ids = json.loads(clob_ids)
+                    except Exception:
+                        clob_ids = []
+                        
+                if len(clob_ids) < 2 or not end_date_str:
+                    continue
+                    
+                end_ts = int(parser.isoparse(end_date_str).timestamp())
+                start_ts = end_ts - 300
+                remaining_seconds = end_ts - now_ts
+                
+                # Check only in the final 180 seconds (3 minutes) of the 5m window
+                if remaining_seconds <= 0 or remaining_seconds > 180:
+                    continue
+                    
+                feed_id = pyth_feed_ids.get(coin)
+                if not feed_id:
+                    continue
+                    
+                start_spot, live_spot = get_pyth_prices(feed_id, start_ts)
+                if not start_spot or not live_spot:
+                    continue
+                    
+                spot_diff = live_spot - start_spot
+                spot_is_down = spot_diff < 0
+                spot_is_up = spot_diff > 0
+                
+                # Fetch live CLOB token prices
+                up_token = clob_ids[0]
+                down_token = clob_ids[1]
+                
+                r_up = requests.get(f"https://clob.polymarket.com/book?token_id={up_token}", timeout=3)
+                r_down = requests.get(f"https://clob.polymarket.com/book?token_id={down_token}", timeout=3)
+                
+                up_price = 0.50
+                down_price = 0.50
+                if r_up.status_code == 200:
+                    bids = r_up.json().get("bids", [])
+                    if bids:
+                        up_price = float(bids[0].get("price", 0.50))
+                if r_down.status_code == 200:
+                    bids = r_down.json().get("bids", [])
+                    if bids:
+                        down_price = float(bids[0].get("price", 0.50))
+                        
+                anomaly_type = None
+                
+                # PUMP Manipulation: Spot is DOWN, but Polymarket UP price >= 52¢
+                if spot_is_down and up_price >= 0.52:
+                    anomaly_type = "SON DAKİKA PUMP MANİPÜLASYONU"
+                    
+                # DUMP Manipulation: Spot is UP, but Polymarket DOWN price >= 52¢
+                elif spot_is_up and down_price >= 0.52:
+                    anomaly_type = "SON DAKİKA DUMP MANİPÜLASYONU"
+                    
+                if anomaly_type:
+                    key = f"{slug}:{anomaly_type}"
+                    if key not in alerted_manipulation_events:
+                        alerted_manipulation_events.add(key)
+                        send_telegram_manipulation_alert(
+                            coin_symbol=coin.upper(),
+                            anomaly_type=anomaly_type,
+                            start_spot=start_spot,
+                            live_spot=live_spot,
+                            up_price=up_price,
+                            down_price=down_price,
+                            market_title=title,
+                            market_slug=slug,
+                            remaining_seconds=remaining_seconds
+                        )
+            except Exception as e:
+                print(f"[MANIPULATION SCANNER ERROR] Error checking {slug}: {e}", flush=True)
+    except Exception as e:
+        print(f"[MANIPULATION SCANNER ERROR] Top-level error: {e}", flush=True)
+
+def manipulation_scanner_loop():
+    print("[INFO] Background Manipulation & Spot-Divergence Scanner Thread Started (10s High Speed Cycle).", flush=True)
+    while True:
+        try:
+            scan_spot_manipulation_anomalies()
+        except Exception as e:
+            print(f"[MANIPULATION SCANNER ERROR] Loop exception: {e}", flush=True)
+        time.sleep(10)
+
+def start_manipulation_scanner():
+    if os.environ.get("MANIPULATION_SCANNER_STARTED") == "true":
+        return
+    os.environ["MANIPULATION_SCANNER_STARTED"] = "true"
+    print("[INFO] Spawning background Manipulation Scanner thread...", flush=True)
+    m_thread = threading.Thread(target=manipulation_scanner_loop, daemon=True)
+    m_thread.start()
+
 def start_whale_scanner():
     if os.environ.get("WHALE_SCANNER_STARTED") == "true":
         return
@@ -1544,6 +1751,7 @@ def start_whale_scanner():
     scanner_thread.start()
     start_bnb_whale_scanner()
     start_btc_orderbook_scanner()
+    start_manipulation_scanner()
 
 # Start thread reliably when running in main app or when running under Gunicorn (which sets PORT environment variable)
 if __name__ == "__main__" or "PORT" in os.environ:
