@@ -1638,8 +1638,12 @@ def send_telegram_manipulation_alert(coin_symbol, anomaly_type, start_spot, live
             except Exception as ex:
                 print(f"[MANIPULATION HOLDERS ERROR] {ex}", flush=True)
 
+        favored_price_cents = int(round(up_price * 100)) if favored_dir == "UP" else int(round(down_price * 100))
+        push_summary = f"{type_emoji} <b>[{coin_symbol} {favored_dir} MANİPÜLASYON]</b> Spot: {spot_status_str} (${spot_diff:+.2f}) | {favored_dir}: {favored_price_cents}¢ ({rem_min}dk {rem_sec}sn)"
+
         text = (
-            f"🚨 🎯 <b>5mFinder MANİPÜLASYON & ÇOKLU CÜZDAN ALARMI!</b> 🎯 🚨\n\n"
+            f"{push_summary}\n\n"
+            f"🎯 <b>5mFinder MANİPÜLASYON & ÇOKLU CÜZDAN ALARMI</b>\n"
             f"🔥 <b>{type_emoji} {anomaly_type} DETECTED!</b> 🔥\n\n"
             f"📊 <b>Piyasa:</b> {market_title}\n"
             f"⏳ <b>Kalan Süre:</b> {rem_min}dk {rem_sec}sn\n\n"
