@@ -1697,13 +1697,17 @@ def scan_spot_manipulation_anomalies():
                         
                 anomaly_type = None
                 
-                # PUMP Manipulation: Spot is DOWN, but Polymarket UP price >= 52¢
-                if spot_is_down and up_price >= 0.52:
+                # 1. Direct Divergence (Spot DOWN, UP >= 50¢ OR Spot UP, DOWN >= 50¢)
+                if spot_is_down and up_price >= 0.50:
                     anomaly_type = "SON DAKİKA PUMP MANİPÜLASYONU"
-                    
-                # DUMP Manipulation: Spot is UP, but Polymarket DOWN price >= 52¢
-                elif spot_is_up and down_price >= 0.52:
+                elif spot_is_up and down_price >= 0.50:
                     anomaly_type = "SON DAKİKA DUMP MANİPÜLASYONU"
+                    
+                # 2. Stubborn Price Resistance (Spot dropped/pumped, but token refuses to drop below 46¢!)
+                elif spot_is_down and up_price >= 0.46:
+                    anomaly_type = "DÜŞÜŞE DİRENEN PUMP SİNYALİ (UP Fiyatı Düşmeyi Reddediyor)"
+                elif spot_is_up and down_price >= 0.46:
+                    anomaly_type = "YÜKSELİŞE DİRENEN DUMP SİNYALİ (DOWN Fiyatı Düşmeyi Reddediyor)"
                     
                 if anomaly_type:
                     key = f"{slug}:{anomaly_type}"
