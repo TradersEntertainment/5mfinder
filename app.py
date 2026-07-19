@@ -1686,7 +1686,7 @@ def scan_spot_manipulation_anomalies():
         now_ts = int(time.time())
         current_interval = (now_ts // 300) * 300
         
-        coins = ["btc", "eth", "sol", "bnb", "xrp"]
+        coins = ["btc"]
         
         for coin in coins:
             slug = f"{coin}-updown-5m-{current_interval}"
