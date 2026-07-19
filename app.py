@@ -1643,8 +1643,6 @@ def send_telegram_manipulation_alert(coin_symbol, anomaly_type, start_spot, live
 
         text = (
             f"{push_summary}\n\n"
-            f"🎯 <b>5mFinder MANİPÜLASYON & ÇOKLU CÜZDAN ALARMI</b>\n"
-            f"🔥 <b>{type_emoji} {anomaly_type} DETECTED!</b> 🔥\n\n"
             f"📊 <b>Piyasa:</b> {market_title}\n"
             f"⏳ <b>Kalan Süre:</b> {rem_min}dk {rem_sec}sn\n\n"
             f"🎯 <b>Price To Beat (Hedef):</b> ${start_spot:,.2f}\n"
