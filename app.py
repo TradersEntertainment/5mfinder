@@ -1545,6 +1545,18 @@ alerted_manipulation_events = set()
 # which filters out single stale/lagged Gamma outcomePrices snapshots.
 manipulation_pending_hits = {}
 
+# Rolling spot readings per market: slug -> [(ts, spot_diff), ...] for the last ~60s.
+# Used to reject alerts right after a sudden pump/dump pushes spot across the strike,
+# where the board lagging behind for a short while is latency, not manipulation.
+manipulation_spot_history = {}
+
+# Last observed favored-side price per "{slug}:{direction}", to detect a board that is
+# actively repricing toward spot (normal) vs one that refuses to move (manipulation).
+manipulation_prev_price = {}
+
+def _spot_side(v):
+    return 1 if v > 0 else (-1 if v < 0 else 0)
+
 def _reset_manipulation_pending(slug, keep_direction=None):
     for d in ("UP", "DOWN"):
         if d != keep_direction:
@@ -1562,6 +1574,10 @@ def _prune_manipulation_state(now_ts):
         manipulation_pending_hits.pop(k, None)
     for k in [k for k in alerted_manipulation_events if _is_old(k)]:
         alerted_manipulation_events.discard(k)
+    for k in [k for k in manipulation_spot_history if _is_old(k)]:
+        manipulation_spot_history.pop(k, None)
+    for k in [k for k in manipulation_prev_price if _is_old(k)]:
+        manipulation_prev_price.pop(k, None)
 
 pyth_feed_ids = {
     "btc": "e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43",
@@ -1756,6 +1772,11 @@ def scan_spot_manipulation_anomalies():
                     
                 spot_diff = live_spot - start_spot
 
+                # Record spot reading history (used by the fresh-cross guard below)
+                hist = manipulation_spot_history.get(slug, [])
+                hist.append((now_ts, spot_diff))
+                manipulation_spot_history[slug] = [h for h in hist if h[0] >= now_ts - 60]
+
                 # Rule 2: Time-scaled minimum spot difference noise filter.
                 # Early in the window the board naturally sits near 50/50 and lags spot,
                 # so a tiny move there is NOT manipulation (this was the main false-alarm
@@ -1838,8 +1859,31 @@ def scan_spot_manipulation_anomalies():
                 if anomaly_type:
                     # favored board direction: spot fell but UP holds -> "UP", spot rose but DOWN holds -> "DOWN"
                     direction = "UP" if spot_is_down else "DOWN"
-                    _reset_manipulation_pending(slug, keep_direction=direction)
+
+                    # Rule 5: Fresh-cross guard. If a sudden pump/dump has only JUST pushed
+                    # spot across the strike, the board lagging behind for a short while is
+                    # normal latency, not manipulation. Require spot to have been on this
+                    # side for at least ~20s and not to have flipped in the last 30s.
+                    cur_side = _spot_side(spot_diff)
+                    hist = manipulation_spot_history.get(slug, [])
+                    stable_since = any(ts <= now_ts - 20 and _spot_side(v) == cur_side for ts, v in hist)
+                    flipped_recently = any(ts >= now_ts - 30 and _spot_side(v) == -cur_side for ts, v in hist)
+                    if not stable_since or flipped_recently:
+                        _reset_manipulation_pending(slug)
+                        continue
+
+                    # Rule 6: Board-reaction guard. If the favored side's price is actively
+                    # falling toward fair value between scans, the board IS repricing to
+                    # follow spot - manipulation means it refuses to move.
                     hit_key = f"{slug}:{direction}"
+                    favored_price = up_price if direction == "UP" else down_price
+                    prev_price = manipulation_prev_price.get(hit_key)
+                    manipulation_prev_price[hit_key] = favored_price
+                    if prev_price is not None and favored_price <= prev_price - 0.03:
+                        manipulation_pending_hits.pop(hit_key, None)
+                        continue
+
+                    _reset_manipulation_pending(slug, keep_direction=direction)
                     hits = manipulation_pending_hits.get(hit_key, 0) + 1
                     manipulation_pending_hits[hit_key] = hits
 
