@@ -1740,8 +1740,8 @@ def scan_spot_manipulation_anomalies():
                 spot_is_up = spot_diff > 0
                 
                 # Fetch live prices from Gamma outcomePrices first as baseline
-                gamma_up = 0.50
-                gamma_down = 0.50
+                gamma_up = None
+                gamma_down = None
                 outcome_prices_raw = market.get("outcomePrices")
                 if outcome_prices_raw:
                     if isinstance(outcome_prices_raw, str):
@@ -1763,16 +1763,22 @@ def scan_spot_manipulation_anomalies():
                 r_up = requests.get(f"https://clob.polymarket.com/book?token_id={up_token}", timeout=3)
                 r_down = requests.get(f"https://clob.polymarket.com/book?token_id={down_token}", timeout=3)
                 
-                up_price = gamma_up
-                down_price = gamma_down
+                clob_up = None
+                clob_down = None
                 if r_up.status_code == 200:
                     bids = r_up.json().get("bids", [])
                     if bids:
-                        up_price = max(up_price, float(bids[0].get("price", 0.50)))
+                        clob_up = float(bids[0].get("price", 0))
                 if r_down.status_code == 200:
                     bids = r_down.json().get("bids", [])
                     if bids:
-                        down_price = max(down_price, float(bids[0].get("price", 0.50)))
+                        clob_down = float(bids[0].get("price", 0))
+                        
+                up_price = clob_up if clob_up is not None else gamma_up
+                down_price = clob_down if clob_down is not None else gamma_down
+                
+                if up_price is None or down_price is None:
+                    continue
                         
                 # Rule 3: Orderbook Settlement Filter (Ignore empty/cleared books at market end)
                 if up_price <= 0.02 or down_price <= 0.02:
