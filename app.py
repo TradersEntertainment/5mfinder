@@ -1684,7 +1684,7 @@ def scan_spot_manipulation_anomalies():
         now_ts = int(time.time())
         current_interval = (now_ts // 300) * 300
         
-        coins = ["btc"]
+        coins = ["btc", "eth", "sol", "bnb", "xrp"]
         
         for coin in coins:
             slug = f"{coin}-updown-5m-{current_interval}"
@@ -1714,8 +1714,8 @@ def scan_spot_manipulation_anomalies():
                 start_ts = end_ts - 300
                 remaining_seconds = end_ts - now_ts
                 
-                # Rule 1: Ignore the final 15 seconds during CLOB market settlement & orderbook clearing
-                if remaining_seconds < 15 or remaining_seconds > 180:
+                # Rule 1: Scan almost full 5m duration (15s to 285s remaining) - only ignore final 15s settlement
+                if remaining_seconds < 15 or remaining_seconds > 285:
                     continue
                     
                 feed_id = pyth_feed_ids.get(coin)
@@ -1728,14 +1728,31 @@ def scan_spot_manipulation_anomalies():
                     
                 spot_diff = live_spot - start_spot
                 
-                # Rule 2: Minimum Spot Price Difference Noise Filter
-                min_diffs = {"btc": 2.00, "eth": 0.30, "sol": 0.10, "bnb": 0.20, "xrp": 0.01}
-                required_min_diff = min_diffs.get(coin.lower(), 1.00)
+                # Rule 2: Minimum Spot Price Difference Noise Filter (Sensitive & Precision-tuned)
+                min_diffs = {"btc": 0.50, "eth": 0.15, "sol": 0.05, "bnb": 0.10, "xrp": 0.01}
+                required_min_diff = min_diffs.get(coin.lower(), 0.10)
                 if abs(spot_diff) < required_min_diff:
                     continue
                     
                 spot_is_down = spot_diff < 0
                 spot_is_up = spot_diff > 0
+                
+                # Fetch live prices from Gamma outcomePrices first as baseline
+                gamma_up = 0.50
+                gamma_down = 0.50
+                outcome_prices_raw = market.get("outcomePrices")
+                if outcome_prices_raw:
+                    if isinstance(outcome_prices_raw, str):
+                        try: outcome_prices = json.loads(outcome_prices_raw)
+                        except: outcome_prices = []
+                    else:
+                        outcome_prices = outcome_prices_raw
+                    if len(outcome_prices) >= 2:
+                        try:
+                            gamma_up = float(outcome_prices[0])
+                            gamma_down = float(outcome_prices[1])
+                        except Exception:
+                            pass
                 
                 # Fetch live CLOB token prices
                 up_token = clob_ids[0]
@@ -1744,19 +1761,19 @@ def scan_spot_manipulation_anomalies():
                 r_up = requests.get(f"https://clob.polymarket.com/book?token_id={up_token}", timeout=3)
                 r_down = requests.get(f"https://clob.polymarket.com/book?token_id={down_token}", timeout=3)
                 
-                up_price = 0.50
-                down_price = 0.50
+                up_price = gamma_up
+                down_price = gamma_down
                 if r_up.status_code == 200:
                     bids = r_up.json().get("bids", [])
                     if bids:
-                        up_price = float(bids[0].get("price", 0.50))
+                        up_price = max(up_price, float(bids[0].get("price", 0.50)))
                 if r_down.status_code == 200:
                     bids = r_down.json().get("bids", [])
                     if bids:
-                        down_price = float(bids[0].get("price", 0.50))
+                        down_price = max(down_price, float(bids[0].get("price", 0.50)))
                         
                 # Rule 3: Orderbook Settlement Filter (Ignore empty/cleared books at market end)
-                if (up_price + down_price) < 0.70 or up_price <= 0.02 or down_price <= 0.02:
+                if up_price <= 0.02 or down_price <= 0.02:
                     continue
                         
                 anomaly_type = None
