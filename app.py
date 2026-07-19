@@ -141,9 +141,9 @@ def get_scanner_status():
 # List of high-performance public Polygon RPCs (ordered by getLogs compatibility)
 RPC_URLS = [
     "https://polygon-public.nodies.app/",
-    "https://polygon.api.onfinality.io/public",
     "https://polygon.drpc.org",
-    "https://polygon.publicnode.com"
+    "https://polygon.publicnode.com",
+    "https://polygon-rpc.com"
 ]
 CTF_ADDRESS = Web3.to_checksum_address("0x4d97dcd97ec945f40cf65f87097ace5ea0476045")
 
