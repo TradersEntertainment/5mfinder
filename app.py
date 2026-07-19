@@ -1739,9 +1739,24 @@ def scan_spot_manipulation_anomalies():
                 spot_is_down = spot_diff < 0
                 spot_is_up = spot_diff > 0
                 
-                # Fetch live prices from Gamma outcomePrices first as baseline
-                gamma_up = None
-                gamma_down = None
+                # Parse outcomes to find correct UP/DOWN index mapping
+                outcomes = market.get("outcomes", ["Up", "Down"])
+                if isinstance(outcomes, str):
+                    try: outcomes = json.loads(outcomes)
+                    except: outcomes = ["Up", "Down"]
+                
+                up_idx = 0
+                down_idx = 1
+                for i, o in enumerate(outcomes):
+                    if o.lower() == "up":
+                        up_idx = i
+                    elif o.lower() == "down":
+                        down_idx = i
+                
+                # Use ONLY Gamma outcomePrices for reliable, correctly-ordered live prices
+                # CLOB orderbook only has dummy 1¢/99¢ market maker orders and causes false signals
+                up_price = None
+                down_price = None
                 outcome_prices_raw = market.get("outcomePrices")
                 if outcome_prices_raw:
                     if isinstance(outcome_prices_raw, str):
@@ -1751,50 +1766,16 @@ def scan_spot_manipulation_anomalies():
                         outcome_prices = outcome_prices_raw
                     if len(outcome_prices) >= 2:
                         try:
-                            gamma_up = float(outcome_prices[0])
-                            gamma_down = float(outcome_prices[1])
+                            up_price = float(outcome_prices[up_idx])
+                            down_price = float(outcome_prices[down_idx])
                         except Exception:
                             pass
                 
-                # Fetch live CLOB token prices
-                up_token = clob_ids[0]
-                down_token = clob_ids[1]
-                
-                r_up = requests.get(f"https://clob.polymarket.com/book?token_id={up_token}", timeout=3)
-                r_down = requests.get(f"https://clob.polymarket.com/book?token_id={down_token}", timeout=3)
-                
-                def extract_valid_token_price(clob_resp, gamma_price):
-                    candidates = []
-                    if clob_resp and clob_resp.status_code == 200:
-                        b_data = clob_resp.json()
-                        for b in b_data.get("bids", []):
-                            try:
-                                p = float(b.get("price", 0))
-                                if 0.02 < p < 0.95:
-                                    candidates.append(p)
-                                    break
-                            except: pass
-                        for a in b_data.get("asks", []):
-                            try:
-                                p = float(a.get("price", 0))
-                                if 0.02 < p < 0.95:
-                                    candidates.append(p)
-                                    break
-                            except: pass
-                    if gamma_price is not None and 0.02 < gamma_price < 0.95:
-                        candidates.append(gamma_price)
-                    if not candidates:
-                        return gamma_price
-                    return max(candidates)
-                    
-                up_price = extract_valid_token_price(r_up, gamma_up)
-                down_price = extract_valid_token_price(r_down, gamma_down)
-                
                 if up_price is None or down_price is None:
                     continue
-                        
-                # Rule 3: Orderbook Settlement & Dummy Filter (Ignore empty, cleared, or non-normalized 99c/99c books)
-                if up_price <= 0.02 or down_price <= 0.02 or (up_price + down_price) > 1.15:
+                
+                # Rule 3: Skip extreme/resolved markets (one side already at 97%+ means no manipulation, market is decided)
+                if up_price >= 0.97 or down_price >= 0.97 or up_price <= 0.03 or down_price <= 0.03:
                     continue
                         
                 anomaly_type = None
