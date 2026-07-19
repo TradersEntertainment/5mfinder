@@ -1714,8 +1714,8 @@ def scan_spot_manipulation_anomalies():
                 start_ts = end_ts - 300
                 remaining_seconds = end_ts - now_ts
                 
-                # Check only in the final 180 seconds (3 minutes) of the 5m window
-                if remaining_seconds <= 0 or remaining_seconds > 180:
+                # Rule 1: Ignore the final 15 seconds during CLOB market settlement & orderbook clearing
+                if remaining_seconds < 15 or remaining_seconds > 180:
                     continue
                     
                 feed_id = pyth_feed_ids.get(coin)
@@ -1727,6 +1727,13 @@ def scan_spot_manipulation_anomalies():
                     continue
                     
                 spot_diff = live_spot - start_spot
+                
+                # Rule 2: Minimum Spot Price Difference Noise Filter
+                min_diffs = {"btc": 2.00, "eth": 0.30, "sol": 0.10, "bnb": 0.20, "xrp": 0.01}
+                required_min_diff = min_diffs.get(coin.lower(), 1.00)
+                if abs(spot_diff) < required_min_diff:
+                    continue
+                    
                 spot_is_down = spot_diff < 0
                 spot_is_up = spot_diff > 0
                 
@@ -1747,6 +1754,10 @@ def scan_spot_manipulation_anomalies():
                     bids = r_down.json().get("bids", [])
                     if bids:
                         down_price = float(bids[0].get("price", 0.50))
+                        
+                # Rule 3: Orderbook Settlement Filter (Ignore empty/cleared books at market end)
+                if (up_price + down_price) < 0.70 or up_price <= 0.02 or down_price <= 0.02:
+                    continue
                         
                 anomaly_type = None
                 
