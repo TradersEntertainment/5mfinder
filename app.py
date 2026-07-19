@@ -1780,10 +1780,6 @@ def scan_spot_manipulation_anomalies():
                 print(f"[MANIPULATION SCANNER ERROR] Error checking {slug}: {e}", flush=True)
     except Exception as e:
         print(f"[MANIPULATION SCANNER ERROR] Top-level error: {e}", flush=True)
-            except Exception as e:
-                print(f"[MANIPULATION SCANNER ERROR] Error checking {slug}: {e}", flush=True)
-    except Exception as e:
-        print(f"[MANIPULATION SCANNER ERROR] Top-level error: {e}", flush=True)
 
 def manipulation_scanner_loop():
     print("[INFO] Background Manipulation & Spot-Divergence Scanner Thread Started (10s High Speed Cycle).", flush=True)
