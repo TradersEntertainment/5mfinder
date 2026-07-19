@@ -1763,37 +1763,38 @@ def scan_spot_manipulation_anomalies():
                 r_up = requests.get(f"https://clob.polymarket.com/book?token_id={up_token}", timeout=3)
                 r_down = requests.get(f"https://clob.polymarket.com/book?token_id={down_token}", timeout=3)
                 
-                clob_up_prices = []
-                clob_down_prices = []
-                if r_up.status_code == 200:
-                    b_data = r_up.json()
-                    for b in b_data.get("bids", [])[:3]:
-                        try: clob_up_prices.append(float(b.get("price", 0)))
-                        except: pass
-                    for a in b_data.get("asks", [])[:3]:
-                        try: clob_up_prices.append(float(a.get("price", 0)))
-                        except: pass
-                        
-                if r_down.status_code == 200:
-                    b_data = r_down.json()
-                    for b in b_data.get("bids", [])[:3]:
-                        try: clob_down_prices.append(float(b.get("price", 0)))
-                        except: pass
-                    for a in b_data.get("asks", [])[:3]:
-                        try: clob_down_prices.append(float(a.get("price", 0)))
-                        except: pass
-                        
-                clob_up = max(clob_up_prices) if clob_up_prices else None
-                clob_down = max(clob_down_prices) if clob_down_prices else None
-                        
-                up_price = clob_up if clob_up is not None else gamma_up
-                down_price = clob_down if clob_down is not None else gamma_down
+                def extract_valid_token_price(clob_resp, gamma_price):
+                    candidates = []
+                    if clob_resp and clob_resp.status_code == 200:
+                        b_data = clob_resp.json()
+                        for b in b_data.get("bids", []):
+                            try:
+                                p = float(b.get("price", 0))
+                                if 0.02 < p < 0.95:
+                                    candidates.append(p)
+                                    break
+                            except: pass
+                        for a in b_data.get("asks", []):
+                            try:
+                                p = float(a.get("price", 0))
+                                if 0.02 < p < 0.95:
+                                    candidates.append(p)
+                                    break
+                            except: pass
+                    if gamma_price is not None and 0.02 < gamma_price < 0.95:
+                        candidates.append(gamma_price)
+                    if not candidates:
+                        return gamma_price
+                    return max(candidates)
+                    
+                up_price = extract_valid_token_price(r_up, gamma_up)
+                down_price = extract_valid_token_price(r_down, gamma_down)
                 
                 if up_price is None or down_price is None:
                     continue
                         
-                # Rule 3: Orderbook Settlement Filter (Ignore empty/cleared books at market end)
-                if up_price <= 0.02 or down_price <= 0.02:
+                # Rule 3: Orderbook Settlement & Dummy Filter (Ignore empty, cleared, or non-normalized 99c/99c books)
+                if up_price <= 0.02 or down_price <= 0.02 or (up_price + down_price) > 1.15:
                     continue
                         
                 anomaly_type = None
