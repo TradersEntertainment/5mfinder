@@ -1763,16 +1763,28 @@ def scan_spot_manipulation_anomalies():
                 r_up = requests.get(f"https://clob.polymarket.com/book?token_id={up_token}", timeout=3)
                 r_down = requests.get(f"https://clob.polymarket.com/book?token_id={down_token}", timeout=3)
                 
-                clob_up = None
-                clob_down = None
+                clob_up_prices = []
+                clob_down_prices = []
                 if r_up.status_code == 200:
-                    bids = r_up.json().get("bids", [])
-                    if bids:
-                        clob_up = float(bids[0].get("price", 0))
+                    b_data = r_up.json()
+                    for b in b_data.get("bids", [])[:3]:
+                        try: clob_up_prices.append(float(b.get("price", 0)))
+                        except: pass
+                    for a in b_data.get("asks", [])[:3]:
+                        try: clob_up_prices.append(float(a.get("price", 0)))
+                        except: pass
+                        
                 if r_down.status_code == 200:
-                    bids = r_down.json().get("bids", [])
-                    if bids:
-                        clob_down = float(bids[0].get("price", 0))
+                    b_data = r_down.json()
+                    for b in b_data.get("bids", [])[:3]:
+                        try: clob_down_prices.append(float(b.get("price", 0)))
+                        except: pass
+                    for a in b_data.get("asks", [])[:3]:
+                        try: clob_down_prices.append(float(a.get("price", 0)))
+                        except: pass
+                        
+                clob_up = max(clob_up_prices) if clob_up_prices else None
+                clob_down = max(clob_down_prices) if clob_down_prices else None
                         
                 up_price = clob_up if clob_up is not None else gamma_up
                 down_price = clob_down if clob_down is not None else gamma_down
@@ -1786,16 +1798,16 @@ def scan_spot_manipulation_anomalies():
                         
                 anomaly_type = None
                 
-                # 1. Direct Divergence (Spot DOWN, UP >= 50¢ OR Spot UP, DOWN >= 50¢)
-                if spot_is_down and up_price >= 0.50:
+                # 1. Direct Divergence (Spot DOWN, UP >= 48¢ OR Spot UP, DOWN >= 48¢)
+                if spot_is_down and up_price >= 0.48:
                     anomaly_type = "SON DAKİKA PUMP MANİPÜLASYONU"
-                elif spot_is_up and down_price >= 0.50:
+                elif spot_is_up and down_price >= 0.48:
                     anomaly_type = "SON DAKİKA DUMP MANİPÜLASYONU"
                     
-                # 2. Stubborn Price Resistance (Spot dropped/pumped, but token refuses to drop below 46¢!)
-                elif spot_is_down and up_price >= 0.46:
+                # 2. Stubborn Price Resistance (Spot dropped/pumped, but token stays inflated at 45¢-47¢!)
+                elif spot_is_down and up_price >= 0.45:
                     anomaly_type = "DÜŞÜŞE DİRENEN PUMP SİNYALİ (UP Fiyatı Düşmeyi Reddediyor)"
-                elif spot_is_up and down_price >= 0.46:
+                elif spot_is_up and down_price >= 0.45:
                     anomaly_type = "YÜKSELİŞE DİRENEN DUMP SİNYALİ (DOWN Fiyatı Düşmeyi Reddediyor)"
                     
                 if anomaly_type:
