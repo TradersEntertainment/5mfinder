@@ -23,13 +23,14 @@ MIN_SPOT_DIFFS = {
 }
 
 def get_pyth_30s_twap(feed_id, target_ts):
-    """Calculates a 30-second TWAP leading up to target_ts using Pyth Hermes API ticks."""
+    """Calculates maximum precision 30-second TWAP by sampling every 1 second (31 points) leading up to target_ts."""
     prices = []
-    timestamps = [target_ts - 30 + (i * 6) for i in range(6)]
+    timestamps = [target_ts - 30 + i for i in range(31)]
+    session = requests.Session()
     for ts in timestamps:
         try:
             url = f"https://hermes.pyth.network/v2/updates/price/{ts}?ids[]={feed_id}"
-            r = requests.get(url, timeout=2)
+            r = session.get(url, timeout=2)
             if r.status_code == 200:
                 parsed = r.json().get("parsed", [])
                 if parsed:
