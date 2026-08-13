@@ -1810,25 +1810,55 @@ def scan_spot_manipulation_anomalies():
                     elif o.lower() == "down":
                         down_idx = i
                 
-                # Use ONLY Gamma outcomePrices for reliable, correctly-ordered live prices
-                # CLOB orderbook only has dummy 1¢/99¢ market maker orders and causes false signals
+                # Gamma outcomePrices no longer syncs for the short-lived 5m updown
+                # markets (stays at the 0.5/0.5 listing default), so the live board
+                # price must come from the CLOB orderbook. In a binary market the DOWN
+                # book mirrors the UP book, so one book fetch prices both sides and the
+                # UP/DOWN index mapping can't get crossed. A wide spread means only the
+                # dummy 1¢/99¢ maker quotes are on the book (the old false-signal
+                # source) -> treat as unpriced instead of inventing a 50¢ midpoint.
                 up_price = None
                 down_price = None
-                outcome_prices_raw = market.get("outcomePrices")
-                if outcome_prices_raw:
-                    if isinstance(outcome_prices_raw, str):
-                        try: outcome_prices = json.loads(outcome_prices_raw)
-                        except: outcome_prices = []
-                    else:
-                        outcome_prices = outcome_prices_raw
-                    if len(outcome_prices) >= 2:
-                        try:
-                            up_price = float(outcome_prices[up_idx])
-                            down_price = float(outcome_prices[down_idx])
-                        except Exception:
-                            pass
-                
+                try:
+                    up_token = str(clob_ids[up_idx])
+                    b_resp = requests.get(f"https://clob.polymarket.com/book?token_id={up_token}", timeout=4)
+                    if b_resp.status_code == 200:
+                        book = b_resp.json()
+                        bid_levels = [float(x.get("price", 0)) for x in book.get("bids", [])]
+                        ask_levels = [float(x.get("price", 0)) for x in book.get("asks", [])]
+                        if bid_levels and ask_levels:
+                            best_bid = max(bid_levels)
+                            best_ask = min(ask_levels)
+                            if 0 < best_bid < best_ask and (best_ask - best_bid) <= 0.10:
+                                up_price = round((best_bid + best_ask) / 2.0, 4)
+                                down_price = round(1.0 - up_price, 4)
+                except Exception:
+                    pass
+
+                # Fallback if the CLOB book is unreachable: Gamma outcomePrices, but the
+                # exact 0.5/0.5 default means "never priced" and must not be trusted
                 if up_price is None or down_price is None:
+                    outcome_prices_raw = market.get("outcomePrices")
+                    if outcome_prices_raw:
+                        if isinstance(outcome_prices_raw, str):
+                            try: outcome_prices = json.loads(outcome_prices_raw)
+                            except: outcome_prices = []
+                        else:
+                            outcome_prices = outcome_prices_raw
+                        if len(outcome_prices) >= 2:
+                            try:
+                                g_up = float(outcome_prices[up_idx])
+                                g_down = float(outcome_prices[down_idx])
+                                if abs(g_up - 0.5) >= 0.005 or abs(g_down - 0.5) >= 0.005:
+                                    up_price = g_up
+                                    down_price = g_down
+                            except Exception:
+                                pass
+
+                if up_price is None or down_price is None:
+                    # No trustworthy board price this scan - a divergence can't be
+                    # confirmed as "holding" through a blind window, so restart the timer
+                    _reset_manipulation_divergence(slug)
                     continue
                 
                 # Rule 3: Skip extreme/resolved markets (one side already at 97%+ means no manipulation, market is decided)
