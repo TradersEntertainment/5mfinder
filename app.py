@@ -4,6 +4,7 @@ import time
 import requests
 import threading
 import json
+from collections import deque
 from datetime import datetime
 from dateutil import parser
 from flask import Flask, request, jsonify, render_template
@@ -1572,6 +1573,8 @@ def _prune_manipulation_state(now_ts):
         alerted_manipulation_events.discard(k)
     for k in [k for k in pyth_start_price_cache if k[1] < cutoff]:
         pyth_start_price_cache.pop(k, None)
+    for k in [k for k in pyth_start_price_meta if k[1] < cutoff]:
+        pyth_start_price_meta.pop(k, None)
 
 pyth_feed_ids = {
     "btc": "e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43",
@@ -1580,6 +1583,138 @@ pyth_feed_ids = {
     "bnb": "2f958174490c92e1f4a9e6a239e03c026b2b8539096db37603f9050d2e825026",
     "xrp": "ec5d2050841d9550325c851681a9ad2630079e14e76865657198852e26aa4d70"
 }
+
+# Reverse map for human-readable logs/alerts only (hot path is keyed by feed_id)
+pyth_feed_to_coin = {fid: coin for coin, fid in pyth_feed_ids.items()}
+
+# --- 30s TWAP bar-open sampling ---
+# The "Price To Beat" is the TWAP of the last 30 seconds of the PREVIOUS bar
+# (= that bar's close = this bar's open), built from 1-second live ticks so the
+# scan loop never blocks on HTTP to price a bar open.
+PYTH_TWAP_WINDOW_SECONDS = 30   # TWAP window: [bar_start - 30, bar_start]
+PYTH_TWAP_MIN_SAMPLES = 20      # of ~31 expected @1Hz; tolerates ~5 failed requests
+PYTH_TWAP_TAIL_SLACK = 5        # newest in-window tick must be within 5s of bar open
+PYTH_TICK_BUFFER_LEN = 400      # <=1 tick per oracle second -> >=400s retention (scan needs 315s)
+
+# feed_id -> deque[(publish_time, price)], appended by the sampler thread only.
+# Pre-created for every known feed so the dict itself is never mutated cross-thread;
+# CPython deque.append is atomic and list(buf) snapshots safely, so no Lock is
+# needed (same lock-free-global convention as the rest of this module).
+pyth_tick_buffers = {fid: deque(maxlen=PYTH_TICK_BUFFER_LEN) for fid in pyth_feed_ids.values()}
+
+# (feed_id, start_ts) -> how the bar-open price was obtained
+# ("30sn TWAP (N örnek)" / "anlık açılış (fallback)"), for alerts + logs
+pyth_start_price_meta = {}
+
+def _sample_pyth_ticks_once():
+    # One sampler tick: a single multi-id Hermes request covering all feeds.
+    # Returns True if the response yielded at least one usable price.
+    ids_qs = "&".join(f"ids[]={fid}" for fid in pyth_feed_ids.values())
+    r = requests.get(f"https://hermes.pyth.network/v2/updates/price/latest?{ids_qs}", timeout=2)
+    if r.status_code != 200:
+        return False
+    got_any = False
+    for item in r.json().get("parsed", []):
+        try:
+            fid = str(item.get("id", "")).lower().removeprefix("0x")
+            buf = pyth_tick_buffers.get(fid)
+            if buf is None:
+                continue
+            p_obj = item.get("price", {})
+            price = int(p_obj.get("price", 0)) * (10 ** int(p_obj.get("expo", 0)))
+            pub_ts = int(p_obj.get("publish_time", 0))
+            if price > 0 and pub_ts > 0:
+                got_any = True
+                # Dedupe: only fresher oracle ticks, so a stale response can't double-count
+                if not buf or pub_ts > buf[-1][0]:
+                    buf.append((pub_ts, float(price)))
+        except Exception:
+            continue
+    return got_any
+
+def pyth_tick_sampler_loop():
+    print("[INFO] Background Pyth 1s Tick Sampler Thread Started (30s TWAP bar-open source).", flush=True)
+    consecutive_failures = 0
+    while True:
+        t0 = time.time()
+        ok = False
+        try:
+            ok = _sample_pyth_ticks_once()
+        except Exception:
+            ok = False
+        if ok:
+            consecutive_failures = 0
+        else:
+            consecutive_failures += 1
+            if consecutive_failures % 120 == 0:
+                print(f"[PYTH SAMPLER] {consecutive_failures} consecutive failed ticks (Hermes unreachable?)", flush=True)
+        # Tick-aligned 1s cadence; 0.2s floor so a slow request can't busy-loop
+        time.sleep(max(0.2, 1.0 - (time.time() - t0)))
+
+def start_pyth_tick_sampler():
+    if os.environ.get("PYTH_TICK_SAMPLER_STARTED") == "true":
+        return
+    os.environ["PYTH_TICK_SAMPLER_STARTED"] = "true"
+    print("[INFO] Spawning background Pyth Tick Sampler thread...", flush=True)
+    sampler_thread = threading.Thread(target=pyth_tick_sampler_loop, daemon=True)
+    sampler_thread.start()
+
+def _fetch_pyth_hist_price(feed_id, ts):
+    # Single-point historical price (the pre-TWAP behavior), used as fallback
+    hist_url = f"https://hermes.pyth.network/v2/updates/price/{ts}?ids[]={feed_id}"
+    r_hist = requests.get(hist_url, timeout=3)
+    if r_hist.status_code == 200:
+        parsed = r_hist.json().get("parsed", [])
+        if parsed:
+            p_obj = parsed[0].get("price", {})
+            price = int(p_obj.get("price", 0)) * (10 ** int(p_obj.get("expo", 0)))
+            if price:
+                return price
+    return None
+
+def get_twap_bar_open(feed_id, start_ts):
+    # Bar-open ("Price To Beat") = TWAP of the previous bar's last 30s, from the tick
+    # buffer - zero HTTP on this path. Falls back to the single-point historical fetch
+    # when the window isn't covered (restart mid-bar, sampler gaps). Cached once per
+    # (feed_id, start_ts): the window is entirely in the past so coverage can never
+    # improve, and the strike must stay constant for the whole bar so the 15s
+    # persistence timer never sees a mid-bar strike flip.
+    cached = pyth_start_price_cache.get((feed_id, start_ts))
+    if cached is not None:
+        return cached
+
+    label = pyth_feed_to_coin.get(feed_id, feed_id[:8]).upper()
+    start_price = None
+    note = None
+    try:
+        buf = pyth_tick_buffers.get(feed_id)
+        if buf is not None:
+            lo = start_ts - PYTH_TWAP_WINDOW_SECONDS
+            ticks = [(t, p) for (t, p) in list(buf) if lo <= t <= start_ts]
+            # ticks is time-ordered (buffer is append-only with increasing publish_time).
+            # Require enough samples AND coverage of the window's tail: a sampler that
+            # died seconds before bar open must not produce a skewed mean.
+            if len(ticks) >= PYTH_TWAP_MIN_SAMPLES and ticks[-1][0] >= start_ts - PYTH_TWAP_TAIL_SLACK:
+                start_price = sum(p for _, p in ticks) / len(ticks)
+                note = f"30sn TWAP ({len(ticks)} örnek)"
+    except Exception as e:
+        # A bug here must degrade to the fallback, never kill the scan
+        print(f"[PYTH TWAP] {label} window compute error: {e}", flush=True)
+        start_price = None
+
+    if start_price is None:
+        try:
+            start_price = _fetch_pyth_hist_price(feed_id, start_ts)
+        except Exception:
+            start_price = None
+        if start_price:
+            note = "anlık açılış (fallback)"
+
+    if start_price:
+        pyth_start_price_cache[(feed_id, start_ts)] = start_price
+        pyth_start_price_meta[(feed_id, start_ts)] = note
+        print(f"[PYTH TWAP] {label} bar {start_ts}: start=${start_price:,.2f} [{note}]", flush=True)
+    return start_price
 
 def get_pyth_prices(feed_id, start_ts):
     try:
@@ -1592,25 +1727,15 @@ def get_pyth_prices(feed_id, start_ts):
                 p_obj = parsed[0].get("price", {})
                 live_price = int(p_obj.get("price", 0)) * (10 ** int(p_obj.get("expo", 0)))
                 
-        # Interval start price never changes -> fetch once per market and cache it,
-        # so each scan only costs a single (live) Pyth request
-        start_price = pyth_start_price_cache.get((feed_id, start_ts))
-        if start_price is None:
-            hist_url = f"https://hermes.pyth.network/v2/updates/price/{start_ts}?ids[]={feed_id}"
-            r_hist = requests.get(hist_url, timeout=3)
-            if r_hist.status_code == 200:
-                parsed = r_hist.json().get("parsed", [])
-                if parsed:
-                    p_obj = parsed[0].get("price", {})
-                    start_price = int(p_obj.get("price", 0)) * (10 ** int(p_obj.get("expo", 0)))
-                    if start_price:
-                        pyth_start_price_cache[(feed_id, start_ts)] = start_price
+        # Bar-open price: 30s TWAP of the previous bar's tail via the tick sampler,
+        # cached once per bar; falls back to the single historical tick when uncovered
+        start_price = get_twap_bar_open(feed_id, start_ts)
 
         return start_price, live_price
     except Exception:
         return None, None
 
-def send_telegram_manipulation_alert(coin_symbol, anomaly_type, start_spot, live_spot, up_price, down_price, market_title, market_slug, remaining_seconds, condition_id=None):
+def send_telegram_manipulation_alert(coin_symbol, anomaly_type, start_spot, live_spot, up_price, down_price, market_title, market_slug, remaining_seconds, condition_id=None, start_price_note=None):
     try:
         BOT_TOKEN = os.environ.get("MANIPULATION_TELEGRAM_BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN")
         CHAT_ID = os.environ.get("MANIPULATION_TELEGRAM_CHAT_ID") or os.environ.get("MANIPULATION_CHAT_ID") or os.environ.get("TELEGRAM_CHAT_ID")
@@ -1678,12 +1803,13 @@ def send_telegram_manipulation_alert(coin_symbol, anomaly_type, start_spot, live
 
         favored_price_cents = int(round(up_price * 100)) if favored_dir == "UP" else int(round(down_price * 100))
         push_summary = f"{type_emoji} <b>[{coin_symbol} {favored_dir} MANİPÜLASYON]</b> Spot: {spot_status_str} (${spot_diff:+.2f}) | {favored_dir}: {favored_price_cents}¢ ({rem_min}dk {rem_sec}sn)"
+        strike_note = f" <i>({start_price_note})</i>" if start_price_note else ""
 
         text = (
             f"{push_summary}\n\n"
             f"📊 <b>Piyasa:</b> {market_title}\n"
             f"⏳ <b>Kalan Süre:</b> {rem_min}dk {rem_sec}sn\n\n"
-            f"🎯 <b>Price To Beat (Hedef):</b> ${start_spot:,.2f}\n"
+            f"🎯 <b>Price To Beat (Hedef):</b> ${start_spot:,.2f}{strike_note}\n"
             f"💵 <b>Current Price (Canlı Spot):</b> ${live_spot:,.2f} (Fark: ${spot_diff:+.2f} -> Spot: {spot_status_str})\n\n"
             f"📈 <b>Polymarket Tahtası:</b> UP <b>{int(round(up_price*100))}¢</b> | DOWN <b>{int(round(down_price*100))}¢</b>\n\n"
             f"{holders_section}"
@@ -1915,7 +2041,8 @@ def scan_spot_manipulation_anomalies():
                             market_title=title,
                             market_slug=slug,
                             remaining_seconds=remaining_seconds,
-                            condition_id=cond_id
+                            condition_id=cond_id,
+                            start_price_note=pyth_start_price_meta.get((feed_id, start_ts))
                         )
                 else:
                     _reset_manipulation_divergence(slug)
@@ -1937,6 +2064,7 @@ def start_manipulation_scanner():
     if os.environ.get("MANIPULATION_SCANNER_STARTED") == "true":
         return
     os.environ["MANIPULATION_SCANNER_STARTED"] = "true"
+    start_pyth_tick_sampler()
     print("[INFO] Spawning background Manipulation Scanner thread...", flush=True)
     m_thread = threading.Thread(target=manipulation_scanner_loop, daemon=True)
     m_thread.start()
