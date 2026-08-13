@@ -1538,7 +1538,7 @@ def start_btc_orderbook_scanner():
     btc_thread.start()
 
 # ----------------- SPOT VS MARKET ODDS MANIPULATION DETECTOR SYSTEM -----------------
-alerted_manipulation_events = set()
+alerted_manipulation_events = {}  # slug -> timestamp of last alert
 
 pyth_feed_ids = {
     "btc": "e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43",
@@ -1793,9 +1793,9 @@ def scan_spot_manipulation_anomalies():
                     anomaly_type = "YÜKSELİŞE DİRENEN DUMP SİNYALİ (DOWN Fiyatı Düşmeyi Reddediyor)"
                     
                 if anomaly_type:
-                    key = f"{slug}:{anomaly_type}"
-                    if key not in alerted_manipulation_events:
-                        alerted_manipulation_events.add(key)
+                    last_alert_ts = alerted_manipulation_events.get(slug, 0)
+                    if now_ts - last_alert_ts >= 15:
+                        alerted_manipulation_events[slug] = now_ts
                         send_telegram_manipulation_alert(
                             coin_symbol=coin.upper(),
                             anomaly_type=anomaly_type,
