@@ -1732,7 +1732,7 @@ def scan_spot_manipulation_anomalies():
                 spot_diff = live_spot - start_spot
                 
                 # Rule 2: Minimum Spot Price Difference Noise Filter (Sensitive & Precision-tuned)
-                min_diffs = {"btc": 0.50, "eth": 0.15, "sol": 0.05, "bnb": 0.10, "xrp": 0.01}
+                min_diffs = {"btc": 5.00, "eth": 0.15, "sol": 0.05, "bnb": 0.10, "xrp": 0.01}
                 required_min_diff = min_diffs.get(coin.lower(), 0.10)
                 if abs(spot_diff) < required_min_diff:
                     continue
