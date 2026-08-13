@@ -1548,37 +1548,8 @@ pyth_feed_ids = {
     "xrp": "ec5d2050841d9550325c851681a9ad2630079e14e76865657198852e26aa4d70"
 }
 
-def get_pyth_30s_twap(feed_id, target_ts):
-    """Calculates maximum precision 30-second TWAP by sampling every 1 second (31 points) leading up to target_ts."""
-    prices = []
-    # Sample all 31 seconds in the 30-second lookback window: [target_ts - 30, target_ts]
-    timestamps = [target_ts - 30 + i for i in range(31)]
-    session = requests.Session()
-    for ts in timestamps:
-        try:
-            url = f"https://hermes.pyth.network/v2/updates/price/{ts}?ids[]={feed_id}"
-            r = session.get(url, timeout=2)
-            if r.status_code == 200:
-                parsed = r.json().get("parsed", [])
-                if parsed:
-                    p_obj = parsed[0].get("price", {})
-                    p = int(p_obj.get("price", 0)) * (10 ** int(p_obj.get("expo", 0)))
-                    if p > 0:
-                        prices.append(p)
-        except Exception:
-            pass
-    if not prices:
-        return None
-    return sum(prices) / len(prices)
-
 def get_pyth_prices(feed_id, start_ts):
-    """
-    Returns (start_spot, live_spot):
-    - start_spot: 30-second TWAP at opening (matches Polymarket 30s TWAP Price To Beat)
-    - live_spot: Instant live Pyth price (catches real-time spot jumps & orderbook divergence)
-    """
     try:
-        # 1. Instant live spot price
         live_url = f"https://hermes.pyth.network/v2/updates/price/latest?ids[]={feed_id}"
         r_live = requests.get(live_url, timeout=3)
         live_price = None
@@ -1588,24 +1559,15 @@ def get_pyth_prices(feed_id, start_ts):
                 p_obj = parsed[0].get("price", {})
                 live_price = int(p_obj.get("price", 0)) * (10 ** int(p_obj.get("expo", 0)))
                 
-        # 2. 30s TWAP for opening Price To Beat (cached per market)
-        start_price = pyth_start_price_cache.get((feed_id, start_ts))
-        if start_price is None:
-            start_price = get_pyth_30s_twap(feed_id, start_ts)
-            if start_price:
-                pyth_start_price_cache[(feed_id, start_ts)] = start_price
-            else:
-                # Fallback to single historical tick if TWAP pending
-                hist_url = f"https://hermes.pyth.network/v2/updates/price/{start_ts}?ids[]={feed_id}"
-                r_hist = requests.get(hist_url, timeout=3)
-                if r_hist.status_code == 200:
-                    parsed = r_hist.json().get("parsed", [])
-                    if parsed:
-                        p_obj = parsed[0].get("price", {})
-                        start_price = int(p_obj.get("price", 0)) * (10 ** int(p_obj.get("expo", 0)))
-                        if start_price:
-                            pyth_start_price_cache[(feed_id, start_ts)] = start_price
-
+        hist_url = f"https://hermes.pyth.network/v2/updates/price/{start_ts}?ids[]={feed_id}"
+        r_hist = requests.get(hist_url, timeout=3)
+        start_price = None
+        if r_hist.status_code == 200:
+            parsed = r_hist.json().get("parsed", [])
+            if parsed:
+                p_obj = parsed[0].get("price", {})
+                start_price = int(p_obj.get("price", 0)) * (10 ** int(p_obj.get("expo", 0)))
+                
         return start_price, live_price
     except Exception:
         return None, None
