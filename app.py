@@ -1538,7 +1538,8 @@ def start_btc_orderbook_scanner():
     btc_thread.start()
 
 # ----------------- SPOT VS MARKET ODDS MANIPULATION DETECTOR SYSTEM -----------------
-alerted_manipulation_events = {}  # slug -> timestamp of last alert
+alerted_manipulation_events = set()  # slug'lar: bu bar için zaten alarm atıldı
+manipulation_first_seen = {}  # slug -> ilk görülme timestamp'i (15s onay için)
 
 pyth_feed_ids = {
     "btc": "e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43",
@@ -1793,9 +1794,13 @@ def scan_spot_manipulation_anomalies():
                     anomaly_type = "YÜKSELİŞE DİRENEN DUMP SİNYALİ (DOWN Fiyatı Düşmeyi Reddediyor)"
                     
                 if anomaly_type:
-                    last_alert_ts = alerted_manipulation_events.get(slug, 0)
-                    if now_ts - last_alert_ts >= 15:
-                        alerted_manipulation_events[slug] = now_ts
+                    # 15 saniye boyunca aynı manipülasyon devam ediyorsa alarm at
+                    if slug not in manipulation_first_seen:
+                        manipulation_first_seen[slug] = now_ts
+                    
+                    elapsed = now_ts - manipulation_first_seen[slug]
+                    if elapsed >= 15 and slug not in alerted_manipulation_events:
+                        alerted_manipulation_events.add(slug)
                         send_telegram_manipulation_alert(
                             coin_symbol=coin.upper(),
                             anomaly_type=anomaly_type,
@@ -1808,6 +1813,9 @@ def scan_spot_manipulation_anomalies():
                             remaining_seconds=remaining_seconds,
                             condition_id=cond_id
                         )
+                else:
+                    # Manipülasyon yok veya düzeldi → timer sıfırla
+                    manipulation_first_seen.pop(slug, None)
             except Exception as e:
                 print(f"[MANIPULATION SCANNER ERROR] Error checking {slug}: {e}", flush=True)
     except Exception as e:
