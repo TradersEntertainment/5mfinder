@@ -1542,12 +1542,12 @@ def start_btc_orderbook_scanner():
 alerted_manipulation_events = set()
 
 # How long the divergence picture must hold CONTINUOUSLY before an alert fires.
-MANIPULATION_PERSIST_SECONDS = 15
+MANIPULATION_PERSIST_SECONDS = 25
 
 # Divergence persistence timers: "{slug}:{direction}" ->
 #   {"ts": when the divergence was first seen, "price": favored side price at that moment}
-# Timestamp-based (not scan-count-based) so the 15s guarantee holds regardless of
-# network latency between scan iterations.
+# Timestamp-based (not scan-count-based) so the persistence guarantee holds
+# regardless of network latency between scan iterations.
 manipulation_divergence_start = {}
 
 # Cache of Pyth interval-start prices: (feed_id, start_ts) -> price.
@@ -1677,7 +1677,7 @@ def get_twap_bar_open(feed_id, start_ts):
     # buffer - zero HTTP on this path. Falls back to the single-point historical fetch
     # when the window isn't covered (restart mid-bar, sampler gaps). Cached once per
     # (feed_id, start_ts): the window is entirely in the past so coverage can never
-    # improve, and the strike must stay constant for the whole bar so the 15s
+    # improve, and the strike must stay constant for the whole bar so the
     # persistence timer never sees a mid-bar strike flip.
     cached = pyth_start_price_cache.get((feed_id, start_ts))
     if cached is not None:
@@ -2029,7 +2029,7 @@ def scan_spot_manipulation_anomalies():
                         # adverse, the timer will run out and the alert still fires.
                         manipulation_divergence_start[key] = {"ts": now_ts, "price": favored_price}
                     elif (now_ts - state["ts"]) >= MANIPULATION_PERSIST_SECONDS and key not in alerted_manipulation_events:
-                        # Picture held continuously for 15s+ with a stubborn board -> ALERT
+                        # Picture held continuously for MANIPULATION_PERSIST_SECONDS+ with a stubborn board -> ALERT
                         alerted_manipulation_events.add(key)
                         send_telegram_manipulation_alert(
                             coin_symbol=coin.upper(),
