@@ -1775,7 +1775,11 @@ def scan_spot_manipulation_anomalies():
                 if up_price is None or down_price is None:
                     continue
                 
-                # Rule 3: Skip extreme/resolved markets (one side already at 97%+ means no manipulation, market is decided)
+                # Rule 3: Skip default 50/50 unpriced markets (Gamma returns 0.5/0.5 when no real orders exist)
+                if abs(up_price - 0.5) < 0.01 and abs(down_price - 0.5) < 0.01:
+                    continue
+                
+                # Rule 4: Skip extreme/resolved markets (one side already at 97%+ means no manipulation, market is decided)
                 if up_price >= 0.97 or down_price >= 0.97 or up_price <= 0.03 or down_price <= 0.03:
                     continue
                         
