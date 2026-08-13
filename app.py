@@ -1717,8 +1717,8 @@ def scan_spot_manipulation_anomalies():
                 start_ts = end_ts - 300
                 remaining_seconds = end_ts - now_ts
                 
-                # Rule 1: Scan almost full 5m duration (15s to 285s remaining) - only ignore final 15s settlement
-                if remaining_seconds < 15 or remaining_seconds > 285:
+                # Rule 1: Scan after bar is at least 60s old (remaining <= 240s), stop 15s before settlement
+                if remaining_seconds < 15 or remaining_seconds > 240:
                     continue
                     
                 feed_id = pyth_feed_ids.get(coin)
