@@ -1538,8 +1538,40 @@ def start_btc_orderbook_scanner():
     btc_thread.start()
 
 # ----------------- SPOT VS MARKET ODDS MANIPULATION DETECTOR SYSTEM -----------------
-alerted_manipulation_events = set()  # slug'lar: bu bar için zaten alarm atıldı
-manipulation_first_seen = {}  # slug -> ilk görülme timestamp'i (15s onay için)
+alerted_manipulation_events = set()
+
+# How long the divergence picture must hold CONTINUOUSLY before an alert fires.
+MANIPULATION_PERSIST_SECONDS = 15
+
+# Divergence persistence timers: "{slug}:{direction}" ->
+#   {"ts": when the divergence was first seen, "price": favored side price at that moment}
+# Timestamp-based (not scan-count-based) so the 15s guarantee holds regardless of
+# network latency between scan iterations.
+manipulation_divergence_start = {}
+
+# Cache of Pyth interval-start prices: (feed_id, start_ts) -> price.
+# The start price of a 5m interval never changes, so fetch it once per market.
+pyth_start_price_cache = {}
+
+def _reset_manipulation_divergence(slug, keep_direction=None):
+    for d in ("UP", "DOWN"):
+        if d != keep_direction:
+            manipulation_divergence_start.pop(f"{slug}:{d}", None)
+
+def _prune_manipulation_state(now_ts):
+    # Slugs embed the 5m interval start timestamp; drop state older than 30 minutes
+    cutoff = now_ts - 1800
+    def _is_old(key):
+        try:
+            return int(key.split(":", 1)[0].rsplit("-", 1)[-1]) < cutoff
+        except Exception:
+            return False
+    for k in [k for k in manipulation_divergence_start if _is_old(k)]:
+        manipulation_divergence_start.pop(k, None)
+    for k in [k for k in alerted_manipulation_events if _is_old(k)]:
+        alerted_manipulation_events.discard(k)
+    for k in [k for k in pyth_start_price_cache if k[1] < cutoff]:
+        pyth_start_price_cache.pop(k, None)
 
 pyth_feed_ids = {
     "btc": "e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43",
@@ -1560,15 +1592,20 @@ def get_pyth_prices(feed_id, start_ts):
                 p_obj = parsed[0].get("price", {})
                 live_price = int(p_obj.get("price", 0)) * (10 ** int(p_obj.get("expo", 0)))
                 
-        hist_url = f"https://hermes.pyth.network/v2/updates/price/{start_ts}?ids[]={feed_id}"
-        r_hist = requests.get(hist_url, timeout=3)
-        start_price = None
-        if r_hist.status_code == 200:
-            parsed = r_hist.json().get("parsed", [])
-            if parsed:
-                p_obj = parsed[0].get("price", {})
-                start_price = int(p_obj.get("price", 0)) * (10 ** int(p_obj.get("expo", 0)))
-                
+        # Interval start price never changes -> fetch once per market and cache it,
+        # so each scan only costs a single (live) Pyth request
+        start_price = pyth_start_price_cache.get((feed_id, start_ts))
+        if start_price is None:
+            hist_url = f"https://hermes.pyth.network/v2/updates/price/{start_ts}?ids[]={feed_id}"
+            r_hist = requests.get(hist_url, timeout=3)
+            if r_hist.status_code == 200:
+                parsed = r_hist.json().get("parsed", [])
+                if parsed:
+                    p_obj = parsed[0].get("price", {})
+                    start_price = int(p_obj.get("price", 0)) * (10 ** int(p_obj.get("expo", 0)))
+                    if start_price:
+                        pyth_start_price_cache[(feed_id, start_ts)] = start_price
+
         return start_price, live_price
     except Exception:
         return None, None
@@ -1686,12 +1723,15 @@ def scan_spot_manipulation_anomalies():
     try:
         now_ts = int(time.time())
         current_interval = (now_ts // 300) * 300
-        
+
+        _prune_manipulation_state(now_ts)
+
         coins = ["btc"]
-        
+
         for coin in coins:
             slug = f"{coin}-updown-5m-{current_interval}"
-            url = f"https://gamma-api.polymarket.com/markets?slug={slug}"
+            # _t cache-buster forces a fresh (non-CDN-cached) Gamma response each scan
+            url = f"https://gamma-api.polymarket.com/markets?slug={slug}&_t={now_ts}"
             try:
                 r = requests.get(url, timeout=4)
                 if r.status_code != 200:
@@ -1717,8 +1757,8 @@ def scan_spot_manipulation_anomalies():
                 start_ts = end_ts - 300
                 remaining_seconds = end_ts - now_ts
                 
-                # Rule 1: Scan after bar is at least 60s old (remaining <= 240s), stop 15s before settlement
-                if remaining_seconds < 15 or remaining_seconds > 240:
+                # Rule 1: Scan almost full 5m duration (15s to 285s remaining) - only ignore final 15s settlement
+                if remaining_seconds < 15 or remaining_seconds > 285:
                     continue
                     
                 feed_id = pyth_feed_ids.get(coin)
@@ -1730,11 +1770,27 @@ def scan_spot_manipulation_anomalies():
                     continue
                     
                 spot_diff = live_spot - start_spot
-                
-                # Rule 2: Minimum Spot Price Difference Noise Filter (Sensitive & Precision-tuned)
-                min_diffs = {"btc": 5.00, "eth": 0.15, "sol": 0.05, "bnb": 0.10, "xrp": 0.01}
-                required_min_diff = min_diffs.get(coin.lower(), 0.10)
+
+                # Rule 2: Time-scaled minimum spot difference noise filter.
+                # Early in the window the board naturally sits near 50/50 and lags spot,
+                # so a tiny move there is NOT manipulation (this was the main false-alarm
+                # source with the old flat $0.50 threshold). Require a big move early on,
+                # and a smaller but still meaningful move near settlement.
+                base_min_diffs = {"btc": 6.0, "eth": 0.40, "sol": 0.08, "bnb": 0.25, "xrp": 0.003}
+                base_min = base_min_diffs.get(coin.lower(), 0.10)
+                if remaining_seconds > 240:
+                    time_scale = 5.0
+                elif remaining_seconds > 180:
+                    time_scale = 3.5
+                elif remaining_seconds > 120:
+                    time_scale = 2.5
+                elif remaining_seconds > 60:
+                    time_scale = 1.5
+                else:
+                    time_scale = 1.0
+                required_min_diff = base_min * time_scale
                 if abs(spot_diff) < required_min_diff:
+                    _reset_manipulation_divergence(slug)
                     continue
                     
                 spot_is_down = spot_diff < 0
@@ -1775,12 +1831,9 @@ def scan_spot_manipulation_anomalies():
                 if up_price is None or down_price is None:
                     continue
                 
-                # Rule 3: Skip default 50/50 unpriced markets (Gamma returns 0.5/0.5 when no real orders exist)
-                if abs(up_price - 0.5) < 0.01 and abs(down_price - 0.5) < 0.01:
-                    continue
-                
-                # Rule 4: Skip extreme/resolved markets (one side already at 97%+ means no manipulation, market is decided)
+                # Rule 3: Skip extreme/resolved markets (one side already at 97%+ means no manipulation, market is decided)
                 if up_price >= 0.97 or down_price >= 0.97 or up_price <= 0.03 or down_price <= 0.03:
+                    _reset_manipulation_divergence(slug)
                     continue
                         
                 anomaly_type = None
@@ -1798,13 +1851,30 @@ def scan_spot_manipulation_anomalies():
                     anomaly_type = "YÜKSELİŞE DİRENEN DUMP SİNYALİ (DOWN Fiyatı Düşmeyi Reddediyor)"
                     
                 if anomaly_type:
-                    # 15 saniye boyunca aynı manipülasyon devam ediyorsa alarm at
-                    if slug not in manipulation_first_seen:
-                        manipulation_first_seen[slug] = now_ts
-                    
-                    elapsed = now_ts - manipulation_first_seen[slug]
-                    if elapsed >= 15 and slug not in alerted_manipulation_events:
-                        alerted_manipulation_events.add(slug)
+                    # favored board direction: spot fell but UP holds -> "UP", spot rose but DOWN holds -> "DOWN"
+                    direction = "UP" if spot_is_down else "DOWN"
+                    _reset_manipulation_divergence(slug, keep_direction=direction)
+
+                    key = f"{slug}:{direction}"
+                    favored_price = up_price if direction == "UP" else down_price
+                    state = manipulation_divergence_start.get(key)
+
+                    if state is None:
+                        # Rule 4: Persistence timer. The divergence picture was just caught -
+                        # start the clock. Any scan where the picture is gone resets it, and
+                        # a spot side-flip (sudden pump/dump crossing the strike) implicitly
+                        # resets it too because the condition flips to the other direction.
+                        manipulation_divergence_start[key] = {"ts": now_ts, "price": favored_price}
+                    elif favored_price <= state["price"] - 0.05:
+                        # Rule 5: Board-reaction guard. The favored side dropped 5c+ since
+                        # the divergence was first seen: the board IS repricing toward spot
+                        # (normal lag catching up), not refusing to move. Restart the timer
+                        # from the current level; if the drop stalls while spot stays
+                        # adverse, the timer will run out and the alert still fires.
+                        manipulation_divergence_start[key] = {"ts": now_ts, "price": favored_price}
+                    elif (now_ts - state["ts"]) >= MANIPULATION_PERSIST_SECONDS and key not in alerted_manipulation_events:
+                        # Picture held continuously for 15s+ with a stubborn board -> ALERT
+                        alerted_manipulation_events.add(key)
                         send_telegram_manipulation_alert(
                             coin_symbol=coin.upper(),
                             anomaly_type=anomaly_type,
@@ -1818,21 +1888,20 @@ def scan_spot_manipulation_anomalies():
                             condition_id=cond_id
                         )
                 else:
-                    # Manipülasyon yok veya düzeldi → timer sıfırla
-                    manipulation_first_seen.pop(slug, None)
+                    _reset_manipulation_divergence(slug)
             except Exception as e:
                 print(f"[MANIPULATION SCANNER ERROR] Error checking {slug}: {e}", flush=True)
     except Exception as e:
         print(f"[MANIPULATION SCANNER ERROR] Top-level error: {e}", flush=True)
 
 def manipulation_scanner_loop():
-    print("[INFO] Background Manipulation & Spot-Divergence Scanner Thread Started (10s High Speed Cycle).", flush=True)
+    print("[INFO] Background Manipulation & Spot-Divergence Scanner Thread Started (5s High Speed Cycle).", flush=True)
     while True:
         try:
             scan_spot_manipulation_anomalies()
         except Exception as e:
             print(f"[MANIPULATION SCANNER ERROR] Loop exception: {e}", flush=True)
-        time.sleep(10)
+        time.sleep(5)
 
 def start_manipulation_scanner():
     if os.environ.get("MANIPULATION_SCANNER_STARTED") == "true":
