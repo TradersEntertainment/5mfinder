@@ -1587,14 +1587,14 @@ pyth_feed_ids = {
 # Reverse map for human-readable logs/alerts only (hot path is keyed by feed_id)
 pyth_feed_to_coin = {fid: coin for coin, fid in pyth_feed_ids.items()}
 
-# --- 30s TWAP bar-open sampling ---
-# The "Price To Beat" is the TWAP of the last 30 seconds of the PREVIOUS bar
+# --- TWAP bar-open sampling ---
+# The "Price To Beat" is the TWAP of the last PYTH_TWAP_WINDOW_SECONDS of the PREVIOUS bar
 # (= that bar's close = this bar's open), built from 1-second live ticks so the
 # scan loop never blocks on HTTP to price a bar open.
-PYTH_TWAP_WINDOW_SECONDS = 30   # TWAP window: [bar_start - 30, bar_start]
-PYTH_TWAP_MIN_SAMPLES = 20      # of ~31 expected @1Hz; tolerates ~5 failed requests
+PYTH_TWAP_WINDOW_SECONDS = 60   # TWAP window: [bar_start - 60, bar_start] (Polymarket 30s->60s, 2026-08-14)
+PYTH_TWAP_MIN_SAMPLES = 40      # of ~61 expected @1Hz; tolerates ~21 failed requests
 PYTH_TWAP_TAIL_SLACK = 5        # newest in-window tick must be within 5s of bar open
-PYTH_TICK_BUFFER_LEN = 400      # <=1 tick per oracle second -> >=400s retention (scan needs 315s)
+PYTH_TICK_BUFFER_LEN = 500      # <=1 tick per oracle second -> >=500s retention (scan needs 345s)
 
 # feed_id -> deque[(publish_time, price)], appended by the sampler thread only.
 # Pre-created for every known feed so the dict itself is never mutated cross-thread;
@@ -1603,7 +1603,7 @@ PYTH_TICK_BUFFER_LEN = 400      # <=1 tick per oracle second -> >=400s retention
 pyth_tick_buffers = {fid: deque(maxlen=PYTH_TICK_BUFFER_LEN) for fid in pyth_feed_ids.values()}
 
 # (feed_id, start_ts) -> how the bar-open price was obtained
-# ("30sn TWAP (N örnek)" / "anlık açılış (fallback)"), for alerts + logs
+# ("<window>sn TWAP (N örnek)" / "anlık açılış (fallback)"), for alerts + logs
 pyth_start_price_meta = {}
 
 def _sample_pyth_ticks_once():
@@ -1633,7 +1633,7 @@ def _sample_pyth_ticks_once():
     return got_any
 
 def pyth_tick_sampler_loop():
-    print("[INFO] Background Pyth 1s Tick Sampler Thread Started (30s TWAP bar-open source).", flush=True)
+    print(f"[INFO] Background Pyth 1s Tick Sampler Thread Started ({PYTH_TWAP_WINDOW_SECONDS}s TWAP bar-open source).", flush=True)
     consecutive_failures = 0
     while True:
         t0 = time.time()
@@ -1673,7 +1673,7 @@ def _fetch_pyth_hist_price(feed_id, ts):
     return None
 
 def get_twap_bar_open(feed_id, start_ts):
-    # Bar-open ("Price To Beat") = TWAP of the previous bar's last 30s, from the tick
+    # Bar-open ("Price To Beat") = TWAP of the previous bar's tail window, from the tick
     # buffer - zero HTTP on this path. Falls back to the single-point historical fetch
     # when the window isn't covered (restart mid-bar, sampler gaps). Cached once per
     # (feed_id, start_ts): the window is entirely in the past so coverage can never
@@ -1696,7 +1696,7 @@ def get_twap_bar_open(feed_id, start_ts):
             # died seconds before bar open must not produce a skewed mean.
             if len(ticks) >= PYTH_TWAP_MIN_SAMPLES and ticks[-1][0] >= start_ts - PYTH_TWAP_TAIL_SLACK:
                 start_price = sum(p for _, p in ticks) / len(ticks)
-                note = f"30sn TWAP ({len(ticks)} örnek)"
+                note = f"{PYTH_TWAP_WINDOW_SECONDS}sn TWAP ({len(ticks)} örnek)"
     except Exception as e:
         # A bug here must degrade to the fallback, never kill the scan
         print(f"[PYTH TWAP] {label} window compute error: {e}", flush=True)
@@ -1727,7 +1727,7 @@ def get_pyth_prices(feed_id, start_ts):
                 p_obj = parsed[0].get("price", {})
                 live_price = int(p_obj.get("price", 0)) * (10 ** int(p_obj.get("expo", 0)))
                 
-        # Bar-open price: 30s TWAP of the previous bar's tail via the tick sampler,
+        # Bar-open price: TWAP of the previous bar's tail via the tick sampler,
         # cached once per bar; falls back to the single historical tick when uncovered
         start_price = get_twap_bar_open(feed_id, start_ts)
 
