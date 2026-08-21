@@ -1587,14 +1587,12 @@ pyth_feed_ids = {
 # Reverse map for human-readable logs/alerts only (hot path is keyed by feed_id)
 pyth_feed_to_coin = {fid: coin for coin, fid in pyth_feed_ids.items()}
 
-# --- Bar-open (1-minute midpoint) sampling ---
-# The "Price To Beat" is the midpoint of the PREVIOUS bar's last minute:
-# (highest + lowest) / 2 over the 1-second live ticks in [bar_start - 60, bar_start],
-# so the scan loop never blocks on HTTP to price a bar open.
-PYTH_MID_WINDOW_SECONDS = 60    # the "last 1-minute bar": [bar_start - 60, bar_start]
-PYTH_MID_MIN_SAMPLES = 40       # of ~61 expected @1Hz; high/low need real coverage
-PYTH_MID_TAIL_SLACK = 5         # newest in-window tick must be within 5s of bar open
-PYTH_TICK_BUFFER_LEN = 500      # <=1 tick per oracle second -> >=500s retention (scan needs 345s)
+# --- Bar-open (last-second) sampling ---
+# The "Price To Beat" is the PREVIOUS bar's last-second price: the single 1-second
+# live tick at or before the bar boundary, so the scan loop never blocks on HTTP to
+# price a bar open. No averaging, no high/low - one point, like the original system.
+PYTH_CLOSE_MAX_AGE_SECONDS = 5  # boundary tick may lag bar open by at most 5s
+PYTH_TICK_BUFFER_LEN = 500      # <=1 tick per oracle second -> >=500s retention (scan needs ~290s)
 
 # feed_id -> deque[(publish_time, price)], appended by the sampler thread only.
 # Pre-created for every known feed so the dict itself is never mutated cross-thread;
@@ -1603,7 +1601,7 @@ PYTH_TICK_BUFFER_LEN = 500      # <=1 tick per oracle second -> >=500s retention
 pyth_tick_buffers = {fid: deque(maxlen=PYTH_TICK_BUFFER_LEN) for fid in pyth_feed_ids.values()}
 
 # (feed_id, start_ts) -> how the bar-open price was obtained
-# ("1dk orta nokta (N örnek)" / "anlık açılış (fallback)"), for alerts + logs
+# ("son saniye (Nsn sapma)" / "son saniye (Hermes fallback)"), for alerts + logs
 pyth_start_price_meta = {}
 
 def _sample_pyth_ticks_once():
@@ -1633,7 +1631,7 @@ def _sample_pyth_ticks_once():
     return got_any
 
 def pyth_tick_sampler_loop():
-    print("[INFO] Background Pyth 1s Tick Sampler Thread Started (1m midpoint source for bar-open strike).", flush=True)
+    print("[INFO] Background Pyth 1s Tick Sampler Thread Started (last-second source for bar-open strike).", flush=True)
     consecutive_failures = 0
     while True:
         t0 = time.time()
@@ -1673,12 +1671,13 @@ def _fetch_pyth_hist_price(feed_id, ts):
     return None
 
 def get_bar_open_price(feed_id, start_ts):
-    # Bar-open ("Price To Beat") = midpoint of the PREVIOUS bar's last minute,
-    # (high + low) / 2 over the buffered ticks - zero HTTP on this path. Falls back to
-    # the single-point historical fetch when the minute isn't covered (restart mid-bar,
-    # sampler gaps). Cached once per (feed_id, start_ts): the window is entirely in the
-    # past so coverage can never improve, and the strike must stay constant for the
-    # whole bar so the persistence timer never sees a mid-bar strike flip.
+    # Bar-open ("Price To Beat") = the PREVIOUS bar's last-second price: the last tick
+    # at or before the bar boundary, read from the tick buffer - zero HTTP on this path.
+    # Falls back to the single-point historical fetch (the original system's call) when
+    # no fresh boundary tick is buffered (restart mid-bar, sampler gaps). Cached once per
+    # (feed_id, start_ts): the boundary is already in the past so it can never change, and
+    # the strike must stay constant for the whole bar so the persistence timer never sees
+    # a mid-bar strike flip.
     cached = pyth_start_price_cache.get((feed_id, start_ts))
     if cached is not None:
         return cached
@@ -1690,20 +1689,18 @@ def get_bar_open_price(feed_id, start_ts):
         buf = pyth_tick_buffers.get(feed_id)
         if buf is not None:
             # The t <= start_ts bound is load-bearing: the sampler keeps appending through
-            # the current bar, so its newest ticks are the LIVE price. Without it the
-            # high/low would span the current bar too and drag the strike toward spot.
-            win_start = start_ts - PYTH_MID_WINDOW_SECONDS
-            ticks = [(t, p) for (t, p) in list(buf) if win_start <= t <= start_ts]
-            # ticks is time-ordered (buffer is append-only with increasing publish_time).
-            # High/low are order statistics: a sparsely sampled minute understates the
-            # true range, so require real coverage AND a tick near the boundary.
-            if len(ticks) >= PYTH_MID_MIN_SAMPLES and ticks[-1][0] >= start_ts - PYTH_MID_TAIL_SLACK:
-                prices = [p for _, p in ticks]
-                start_price = (max(prices) + min(prices)) / 2
-                note = f"1dk orta nokta ({len(ticks)} örnek)"
+            # the current bar, so the buffer's newest tick is the LIVE price. Dropping it
+            # would make start_spot == live_spot and silently kill all detection.
+            ticks = [(t, p) for (t, p) in list(buf) if t <= start_ts]
+            # ticks is time-ordered (buffer is append-only with increasing publish_time),
+            # so the last one is the bar's final price. Reject a stale tick from a sampler
+            # that died before the boundary - that price is not this bar's open.
+            if ticks and ticks[-1][0] >= start_ts - PYTH_CLOSE_MAX_AGE_SECONDS:
+                close_ts, start_price = ticks[-1]
+                note = f"son saniye ({start_ts - close_ts}sn sapma)"
     except Exception as e:
         # A bug here must degrade to the fallback, never kill the scan
-        print(f"[PYTH OPEN] {label} midpoint compute error: {e}", flush=True)
+        print(f"[PYTH OPEN] {label} last-second lookup error: {e}", flush=True)
         start_price = None
 
     if start_price is None:
@@ -1712,7 +1709,7 @@ def get_bar_open_price(feed_id, start_ts):
         except Exception:
             start_price = None
         if start_price:
-            note = "anlık açılış (fallback)"
+            note = "son saniye (Hermes fallback)"
 
     if start_price:
         pyth_start_price_cache[(feed_id, start_ts)] = start_price
@@ -1731,8 +1728,8 @@ def get_pyth_prices(feed_id, start_ts):
                 p_obj = parsed[0].get("price", {})
                 live_price = int(p_obj.get("price", 0)) * (10 ** int(p_obj.get("expo", 0)))
                 
-        # Bar-open price: midpoint of the previous bar's last minute via the tick sampler,
-        # cached once per bar; falls back to the single historical tick when uncovered
+        # Bar-open price: the previous bar's last-second tick via the tick sampler,
+        # cached once per bar; falls back to the single historical tick when unavailable
         start_price = get_bar_open_price(feed_id, start_ts)
 
         return start_price, live_price
