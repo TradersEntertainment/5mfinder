@@ -4,6 +4,8 @@ import time
 import requests
 import threading
 import json
+import hmac
+import hashlib
 from collections import deque
 from datetime import datetime
 from dateutil import parser
@@ -1543,6 +1545,12 @@ alerted_manipulation_events = set()
 
 # How long the divergence picture must hold CONTINUOUSLY before an alert fires.
 MANIPULATION_PERSIST_SECONDS = 25
+# Alerts are held until the final minute of the bar. That window is exactly the span the
+# closing 60s TWAP averages over, so it is the only stretch where pushing the board (or
+# the price) can still change the outcome - and a board still contradicting spot there is
+# manipulation rather than the TWAP's ~30s lag catching up. Detection and the persistence
+# timer run for the whole bar; only the notification waits.
+MANIPULATION_ALERT_WINDOW_SECONDS = 60
 
 # Divergence persistence timers: "{slug}:{direction}" ->
 #   {"ts": when the divergence was first seen, "price": favored side price at that moment}
@@ -1550,9 +1558,11 @@ MANIPULATION_PERSIST_SECONDS = 25
 # regardless of network latency between scan iterations.
 manipulation_divergence_start = {}
 
-# Cache of Pyth interval-start prices: (feed_id, start_ts) -> price.
-# The start price of a 5m interval never changes, so fetch it once per market.
-pyth_start_price_cache = {}
+# Cache of bar-open strikes: (coin, start_ts) -> official 60s TWAP price.
+# A bar's open is already in the past and never changes, so it is fetched once. Keyed by
+# coin rather than feed so the 5m and 15m scanners share the entry on the boundaries they
+# have in common (every 15m boundary is also a 5m one).
+spot_start_price_cache = {}
 
 # slug -> last diagnostic reason code printed for it, so the 5s loop reports a
 # skip once instead of ~50 times per bar. The reason code is stable while the
@@ -1586,223 +1596,247 @@ def _prune_manipulation_state(now_ts):
         manipulation_divergence_start.pop(k, None)
     for k in [k for k in alerted_manipulation_events if _is_old(k)]:
         alerted_manipulation_events.discard(k)
-    for k in [k for k in pyth_start_price_cache if k[1] < cutoff]:
-        pyth_start_price_cache.pop(k, None)
-    for k in [k for k in pyth_start_price_meta if k[1] < cutoff]:
-        pyth_start_price_meta.pop(k, None)
+    for k in [k for k in spot_start_price_cache if k[1] < cutoff]:
+        spot_start_price_cache.pop(k, None)
+    for k in [k for k in spot_start_price_meta if k[1] < cutoff]:
+        spot_start_price_meta.pop(k, None)
+    for k in [k for k in spot_open_gap if k[1] < cutoff]:
+        spot_open_gap.pop(k, None)
     for k in [k for k in manipulation_diag_logged if _is_old(k)]:
         manipulation_diag_logged.pop(k, None)
 
-pyth_feed_ids = {
-    "btc": "e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43",
-    "eth": "ff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fc0ace",
-    "sol": "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d",
-    "bnb": "2f958174490c92e1f4a9e6a239e03c026b2b8539096db37603f9050d2e825026",
-    "xrp": "ec5d2050841d9550325c851681a9ad2630079e14e76865657198852e26aa4d70"
-}
+# --- Chainlink Data Streams: the oracle Polymarket actually resolves on ---
+# The market rules name the BTC/USD 60s TWAP stream as the resolution source, so the
+# bar-open strike ("Price To Beat") is READ from that stream instead of being
+# approximated from ticks. RefPrice is the fast instantaneous feed and drives the live
+# comparison: it leads the TWAP, which is exactly what makes a board that refuses to
+# follow it visible.
+#
+# The TWAP value at a bar boundary is simultaneously the close of the bar ending there
+# and the open of the bar starting there, and every 15m boundary is also a 5m boundary,
+# so one cached value per (coin, boundary) feeds both scanners and they can never
+# disagree about a strike.
+CHAINLINK_STREAMS_BASE = os.environ.get("CHAINLINK_STREAMS_BASE", "https://api.dataengine.chain.link").rstrip("/")
+CHAINLINK_STREAMS_API_KEY = os.environ.get("CHAINLINK_STREAMS_API_KEY", "")
+CHAINLINK_STREAMS_API_SECRET = os.environ.get("CHAINLINK_STREAMS_API_SECRET", "")
 
-# Reverse map for human-readable logs/alerts only (hot path is keyed by feed_id)
-pyth_feed_to_coin = {fid: coin for coin, fid in pyth_feed_ids.items()}
+# Feed ids are public identifiers, not secrets; the env vars exist only so a feed can be
+# repointed without a deploy.
+CL_FEED_BTC_REFPRICE = os.environ.get(
+    "CHAINLINK_FEED_BTC_REFPRICE",
+    "0x00039d9e45394f473ab1f050a1b963e6b05351e52d71e507509ada0c95ed75b8").lower()
+CL_FEED_BTC_TWAP60 = os.environ.get(
+    "CHAINLINK_FEED_BTC_TWAP60",
+    "0x0002ee6757e8822c00d273bc340fc24c9cafe123a4ff2ea1dbdb31944bc7d95f").lower()
 
-# --- Bar-open (last-second) sampling ---
-# The "Price To Beat" is the PREVIOUS bar's last-second price: the single 1-second
-# live tick at or before the bar boundary, so the scan loop never blocks on HTTP to
-# price a bar open. No averaging, no high/low - one point, like the original system.
-PYTH_CLOSE_MAX_AGE_SECONDS = 5  # boundary tick may lag bar open by at most 5s
-PYTH_TICK_BUFFER_LEN = 1000     # <=1 tick per oracle second -> >=1000s retention (15m bar needs ~890s)
+# coin -> {"live": fast RefPrice feed, "strike": official 60s TWAP feed}
+spot_feeds = {"btc": {"live": CL_FEED_BTC_REFPRICE, "strike": CL_FEED_BTC_TWAP60}}
 
-# feed_id -> deque[(publish_time, price)], appended by the sampler thread only.
-# Pre-created for every known feed so the dict itself is never mutated cross-thread;
-# CPython deque.append is atomic and list(buf) snapshots safely, so no Lock is
-# needed (same lock-free-global convention as the rest of this module).
-pyth_tick_buffers = {fid: deque(maxlen=PYTH_TICK_BUFFER_LEN) for fid in pyth_feed_ids.values()}
+SPOT_TICK_BUFFER_LEN = 1000      # 1 tick/sec -> >=1000s retention (a 15m bar needs ~890s)
+SPOT_LIVE_MAX_AGE_SECONDS = 30   # a live price older than this is stale, not a price
 
-# (feed_id, start_ts) -> how the bar-open price was obtained
-# ("son saniye (Nsn sapma)" / "son saniye (Hermes fallback)"), for alerts + logs
-pyth_start_price_meta = {}
+# coin -> deque[(observation_ts, price)], appended by the sampler thread only.
+# CPython deque.append is atomic and list(buf) snapshots safely, so no Lock is needed
+# (same lock-free-global convention as the rest of this module).
+spot_tick_buffers = {c: deque(maxlen=SPOT_TICK_BUFFER_LEN) for c in spot_feeds}
 
-# Hermes began answering 401 on 2026-08-26: the public endpoint now needs credentials.
-# Both the base URL and the auth header are env-configurable so switching to a key, a
-# self-hosted Hermes or an alternate provider is a Railway variable, not a code change.
-PYTH_HERMES_BASE = os.environ.get("PYTH_HERMES_BASE", "https://hermes.pyth.network").rstrip("/")
+# (coin, start_ts) -> how the strike was obtained, for alerts + logs
+spot_start_price_meta = {}
 
-def _pyth_headers():
-    # No key configured -> unauthenticated request, exactly as before.
-    key = os.environ.get("PYTH_API_KEY")
-    if not key:
-        return None
-    # Default to the usual bearer scheme; PYTH_AUTH_HEADER overrides the header name
-    # and sends the key verbatim (e.g. "x-api-key") for providers that want that.
-    header = os.environ.get("PYTH_AUTH_HEADER")
-    if header:
-        return {header: key}
-    return {"Authorization": f"Bearer {key}"}
+# (coin, start_ts) -> RefPrice at the boundary minus the official TWAP strike. A 60s TWAP
+# trails RefPrice by roughly 30s of trend, so this gap is non-zero even when nobody is
+# trading. Logging it measures how much of spot_diff is structural lag rather than a real
+# move, which is the number needed to decide whether it should be subtracted.
+spot_open_gap = {}
 
-# Why the last Hermes call failed. All three Pyth call sites used to fail silently,
-# so a total outage and a quiet market looked identical in the logs.
-pyth_last_failure = {"where": None, "reason": None}
+# Why the last Data Streams call failed. Every price call site used to fail silently,
+# which is how a five-day outage looked identical to a quiet market.
+spot_last_failure = {"where": None, "reason": None}
 
-def _note_pyth_failure(where, reason):
-    pyth_last_failure["where"] = where
-    pyth_last_failure["reason"] = reason
+def _note_spot_failure(where, reason):
+    spot_last_failure["where"] = where
+    spot_last_failure["reason"] = reason
 
-def _pyth_failure_note():
-    if not pyth_last_failure["reason"]:
+def _spot_failure_note():
+    if not spot_last_failure["reason"]:
         return "sebep kaydedilmedi"
-    return f"{pyth_last_failure['where']} -> {pyth_last_failure['reason']}"
+    return f"{spot_last_failure['where']} -> {spot_last_failure['reason']}"
 
-def _sample_pyth_ticks_once():
-    # One sampler tick: a single multi-id Hermes request covering all feeds.
-    # Returns True if the response yielded at least one usable price.
-    ids_qs = "&".join(f"ids[]={fid}" for fid in pyth_feed_ids.values())
-    r = requests.get(f"{PYTH_HERMES_BASE}/v2/updates/price/latest?{ids_qs}", timeout=2, headers=_pyth_headers())
+def _cl_auth_headers(method, path_with_query, body=b""):
+    # Data Streams signs every request: HMAC-SHA256 over
+    # "{method} {path+query} {sha256(body)} {clientId} {timestamp_ms}".
+    ts_ms = int(time.time() * 1000)
+    body_hash = hashlib.sha256(body).hexdigest()
+    to_sign = f"{method} {path_with_query} {body_hash} {CHAINLINK_STREAMS_API_KEY} {ts_ms}"
+    sig = hmac.new(CHAINLINK_STREAMS_API_SECRET.encode(), to_sign.encode(), hashlib.sha256).hexdigest()
+    return {
+        "Authorization": CHAINLINK_STREAMS_API_KEY,
+        "X-Authorization-Timestamp": str(ts_ms),
+        "X-Authorization-Signature-SHA256": sig,
+    }
+
+# Call sites whose raw response we have already dumped, so a shape mismatch is reported
+# once rather than every second.
+_ds_raw_dumped = set()
+
+def _decode_ds_report(full_report):
+    # A v3 crypto report is nine 32-byte STATIC words, so plain slicing decodes it and no
+    # ABI library is needed. fullReport wraps it as
+    # abi.encode(bytes32[3] ctx, bytes blob, bytes32[] rs, bytes32[] ss, bytes32 rawVs):
+    # words 0-2 are the context and word 3 is the offset to the blob.
+    raw = bytes.fromhex(full_report[2:] if full_report.startswith("0x") else full_report)
+    blob_off = int.from_bytes(raw[96:128], "big")
+    blob_len = int.from_bytes(raw[blob_off:blob_off + 32], "big")
+    blob = raw[blob_off + 32: blob_off + 32 + blob_len]
+    # blob words: 0 feedId, 1 validFrom, 2 observations, 3 nativeFee, 4 linkFee,
+    # 5 expiresAt, 6 price, 7 bid, 8 ask. price is int192 scaled by 1e18.
+    price = int.from_bytes(blob[192:224], "big", signed=True) / 1e18
+    obs_ts = int.from_bytes(blob[64:96], "big")
+    return price, obs_ts
+
+def _cl_fetch(path, where):
+    # Returns (price, observation_ts) or None; never raises for an expected failure.
+    if not CHAINLINK_STREAMS_API_KEY or not CHAINLINK_STREAMS_API_SECRET:
+        _note_spot_failure(where, "CHAINLINK_STREAMS_API_KEY/SECRET tanimli degil")
+        return None
+    r = requests.get(f"{CHAINLINK_STREAMS_BASE}{path}",
+                     headers=_cl_auth_headers("GET", path), timeout=3)
     if r.status_code != 200:
-        _note_pyth_failure("sampler", f"HTTP {r.status_code}: {str(r.text)[:120]}")
-        return False
+        _note_spot_failure(where, f"HTTP {r.status_code}: {str(r.text)[:120]}")
+        return None
+    payload = r.json()
+    rep = payload.get("report")
+    if rep is None:
+        reports = payload.get("reports") or []
+        rep = reports[0] if reports else None
+    full = (rep or {}).get("fullReport")
+    if not full:
+        # The response shape is the one thing that could not be checked offline, so dump
+        # it once per call site: a mismatch becomes a five-minute fix, not a guess.
+        if where not in _ds_raw_dumped:
+            _ds_raw_dumped.add(where)
+            print(f"[SPOT] {where} beklenmeyen cevap sekli: {str(payload)[:400]}", flush=True)
+        _note_spot_failure(where, "cevapta fullReport yok")
+        return None
+    try:
+        price, obs_ts = _decode_ds_report(full)
+    except Exception as e:
+        if where not in _ds_raw_dumped:
+            _ds_raw_dumped.add(where)
+            print(f"[SPOT] {where} rapor cozulemedi: {type(e).__name__}: {e} | ham: {str(full)[:200]}", flush=True)
+        _note_spot_failure(where, f"rapor cozulemedi: {type(e).__name__}: {e}")
+        return None
+    if not (100.0 < price < 10000000.0):
+        _note_spot_failure(where, f"makul olmayan fiyat: {price}")
+        return None
+    return price, obs_ts
+
+def _sample_spot_ticks_once():
+    # One sampler tick: latest RefPrice for every configured coin.
     got_any = False
-    for item in r.json().get("parsed", []):
-        try:
-            fid = str(item.get("id", "")).lower().removeprefix("0x")
-            buf = pyth_tick_buffers.get(fid)
-            if buf is None:
-                continue
-            p_obj = item.get("price", {})
-            price = int(p_obj.get("price", 0)) * (10 ** int(p_obj.get("expo", 0)))
-            pub_ts = int(p_obj.get("publish_time", 0))
-            if price > 0 and pub_ts > 0:
-                got_any = True
-                # Dedupe: only fresher oracle ticks, so a stale response can't double-count
-                if not buf or pub_ts > buf[-1][0]:
-                    buf.append((pub_ts, float(price)))
-        except Exception:
+    for coin, feeds in spot_feeds.items():
+        res = _cl_fetch(f"/api/v1/reports/latest?feedID={feeds['live']}", "sampler")
+        if not res:
             continue
-    if not got_any:
-        _note_pyth_failure("sampler", "HTTP 200 ama kullanilabilir fiyat yok")
+        price, obs_ts = res
+        buf = spot_tick_buffers.get(coin)
+        if buf is None:
+            continue
+        ts = obs_ts or int(time.time())
+        # Dedupe: only fresher observations, so a repeated report cannot double-count
+        if not buf or ts > buf[-1][0]:
+            buf.append((ts, float(price)))
+        got_any = True
     return got_any
 
-def pyth_tick_sampler_loop():
-    print("[INFO] Background Pyth 1s Tick Sampler Thread Started (last-second source for bar-open strike).", flush=True)
+def spot_tick_sampler_loop():
+    print("[INFO] Background Chainlink RefPrice Sampler Thread Started (1s cadence).", flush=True)
     consecutive_failures = 0
     connected_once = False
     while True:
         t0 = time.time()
         ok = False
         try:
-            ok = _sample_pyth_ticks_once()
+            ok = _sample_spot_ticks_once()
         except Exception as e:
-            _note_pyth_failure("sampler", f"{type(e).__name__}: {e}")
+            _note_spot_failure("sampler", f"{type(e).__name__}: {e}")
             ok = False
         if ok:
             if not connected_once:
                 connected_once = True
-                print("[PYTH SAMPLER] Hermes baglantisi kuruldu.", flush=True)
+                print("[SPOT SAMPLER] Chainlink baglantisi kuruldu.", flush=True)
             elif consecutive_failures:
-                print(f"[PYTH SAMPLER] baglanti geri geldi ({consecutive_failures} basarisiz tiktan sonra).", flush=True)
+                print(f"[SPOT SAMPLER] baglanti geri geldi ({consecutive_failures} basarisiz tiktan sonra).", flush=True)
             consecutive_failures = 0
         else:
             consecutive_failures += 1
-            # Report the FIRST failure at once - the old "every 120 ticks" rule hid the
-            # reason for two minutes - then thin out so a long outage can't flood the log.
+            # Report the FIRST failure at once, then thin out so a long outage cannot
+            # flood the log.
             if consecutive_failures == 1 or consecutive_failures % 300 == 0:
-                print(f"[PYTH SAMPLER] {consecutive_failures} ardisik basarisiz tik (son sebep: {_pyth_failure_note()})", flush=True)
-        # Tick-aligned 1s cadence; 0.2s floor so a slow request can't busy-loop
+                print(f"[SPOT SAMPLER] {consecutive_failures} ardisik basarisiz tik (son sebep: {_spot_failure_note()})", flush=True)
+        # Tick-aligned 1s cadence; 0.2s floor so a slow request cannot busy-loop
         time.sleep(max(0.2, 1.0 - (time.time() - t0)))
 
-def start_pyth_tick_sampler():
-    if os.environ.get("PYTH_TICK_SAMPLER_STARTED") == "true":
+def start_spot_tick_sampler():
+    if os.environ.get("SPOT_TICK_SAMPLER_STARTED") == "true":
         return
-    os.environ["PYTH_TICK_SAMPLER_STARTED"] = "true"
-    print("[INFO] Spawning background Pyth Tick Sampler thread...", flush=True)
-    sampler_thread = threading.Thread(target=pyth_tick_sampler_loop, daemon=True)
+    os.environ["SPOT_TICK_SAMPLER_STARTED"] = "true"
+    print("[INFO] Spawning background Chainlink RefPrice Sampler thread...", flush=True)
+    sampler_thread = threading.Thread(target=spot_tick_sampler_loop, daemon=True)
     sampler_thread.start()
 
-def _fetch_pyth_hist_price(feed_id, ts):
-    # Single-point historical price at the bar boundary, used as fallback
-    hist_url = f"{PYTH_HERMES_BASE}/v2/updates/price/{ts}?ids[]={feed_id}"
-    r_hist = requests.get(hist_url, timeout=3, headers=_pyth_headers())
-    if r_hist.status_code != 200:
-        _note_pyth_failure("hist", f"HTTP {r_hist.status_code}: {str(r_hist.text)[:120]}")
-        return None
-    parsed = r_hist.json().get("parsed", [])
-    if parsed:
-        p_obj = parsed[0].get("price", {})
-        price = int(p_obj.get("price", 0)) * (10 ** int(p_obj.get("expo", 0)))
-        if price:
-            return price
-    _note_pyth_failure("hist", "HTTP 200 ama parsed bos")
-    return None
-
-def get_bar_open_price(feed_id, start_ts):
-    # Bar-open ("Price To Beat") = the PREVIOUS bar's last-second price: the last tick
-    # at or before the bar boundary, read from the tick buffer - zero HTTP on this path.
-    # Falls back to the single-point historical fetch (the original system's call) when
-    # no fresh boundary tick is buffered (restart mid-bar, sampler gaps). Cached once per
-    # (feed_id, start_ts): the boundary is already in the past so it can never change, and
-    # the strike must stay constant for the whole bar so the persistence timer never sees
-    # a mid-bar strike flip.
-    cached = pyth_start_price_cache.get((feed_id, start_ts))
+def get_bar_open_price(coin, start_ts):
+    # Strike = the official 60s TWAP at the bar boundary, read straight from the stream
+    # the resolution rules name. Cached per (coin, start_ts): the value is already in the
+    # past so it can never change, the strike must stay constant for the whole bar (a
+    # mid-bar flip would corrupt the persistence timer), and since every 15m boundary is
+    # also a 5m boundary the two scanners share one entry.
+    cached = spot_start_price_cache.get((coin, start_ts))
     if cached is not None:
         return cached
+    feeds = spot_feeds.get(coin)
+    if not feeds:
+        return None
+    res = _cl_fetch(f"/api/v1/reports?feedID={feeds['strike']}&timestamp={start_ts}", "strike")
+    if not res:
+        return None
+    price, _obs = res
+    spot_start_price_cache[(coin, start_ts)] = price
+    spot_start_price_meta[(coin, start_ts)] = "resmi TWAP-60s"
+    # Structural lag: where RefPrice sat at the same boundary. Non-zero during a trend
+    # even with no manipulation at all.
+    gap_note = ""
+    buf = spot_tick_buffers.get(coin)
+    if buf:
+        at_open = [p for (t, p) in list(buf) if t <= start_ts]
+        if at_open:
+            gap = at_open[-1] - price
+            spot_open_gap[(coin, start_ts)] = gap
+            gap_note = f" | acilis RefPrice farki: {gap:+.2f}"
+    print(f"[SPOT] {coin.upper()} bar {start_ts}: strike=${price:,.2f} (resmi TWAP-60s){gap_note}", flush=True)
+    return price
 
-    label = pyth_feed_to_coin.get(feed_id, feed_id[:8]).upper()
-    start_price = None
-    note = None
+def get_spot_prices(coin, start_ts):
+    # (official TWAP strike, live RefPrice). The live half is served from the sampler
+    # buffer so the scan loop never blocks on HTTP; the strike costs one request per bar.
     try:
-        buf = pyth_tick_buffers.get(feed_id)
-        if buf is not None:
-            # The t <= start_ts bound is load-bearing: the sampler keeps appending through
-            # the current bar, so the buffer's newest tick is the LIVE price. Dropping it
-            # would make start_spot == live_spot and silently kill all detection.
-            ticks = [(t, p) for (t, p) in list(buf) if t <= start_ts]
-            # ticks is time-ordered (buffer is append-only with increasing publish_time),
-            # so the last one is the bar's final price. Reject a stale tick from a sampler
-            # that died before the boundary - that price is not this bar's open.
-            if ticks and ticks[-1][0] >= start_ts - PYTH_CLOSE_MAX_AGE_SECONDS:
-                close_ts, start_price = ticks[-1]
-                note = f"son saniye ({start_ts - close_ts}sn sapma)"
-    except Exception as e:
-        # A bug here must degrade to the fallback, never kill the scan
-        print(f"[PYTH OPEN] {label} last-second lookup error: {e}", flush=True)
-        start_price = None
-
-    if start_price is None:
-        try:
-            start_price = _fetch_pyth_hist_price(feed_id, start_ts)
-        except Exception as e:
-            _note_pyth_failure("hist", f"{type(e).__name__}: {e}")
-            start_price = None
-        if start_price:
-            note = "son saniye (Hermes fallback)"
-
-    if start_price:
-        pyth_start_price_cache[(feed_id, start_ts)] = start_price
-        pyth_start_price_meta[(feed_id, start_ts)] = note
-        print(f"[PYTH OPEN] {label} bar {start_ts}: start=${start_price:,.2f} [{note}]", flush=True)
-    return start_price
-
-def get_pyth_prices(feed_id, start_ts):
-    try:
-        live_url = f"{PYTH_HERMES_BASE}/v2/updates/price/latest?ids[]={feed_id}"
-        r_live = requests.get(live_url, timeout=3, headers=_pyth_headers())
         live_price = None
-        if r_live.status_code == 200:
-            parsed = r_live.json().get("parsed", [])
-            if parsed:
-                p_obj = parsed[0].get("price", {})
-                live_price = int(p_obj.get("price", 0)) * (10 ** int(p_obj.get("expo", 0)))
+        buf = spot_tick_buffers.get(coin)
+        if buf:
+            ts, price = buf[-1]
+            age = int(time.time()) - ts
+            if age <= SPOT_LIVE_MAX_AGE_SECONDS:
+                live_price = price
             else:
-                _note_pyth_failure("live", "HTTP 200 ama parsed bos")
-        else:
-            _note_pyth_failure("live", f"HTTP {r_live.status_code}: {str(r_live.text)[:120]}")
-                
-        # Bar-open price: the previous bar's last-second tick via the tick sampler,
-        # cached once per bar; falls back to the single historical tick when unavailable
-        start_price = get_bar_open_price(feed_id, start_ts)
-
+                _note_spot_failure("live", f"en yeni tick {age}s eski")
+        elif buf is not None:
+            _note_spot_failure("live", "tick buffer bos (sampler henuz veri almadi)")
+        start_price = get_bar_open_price(coin, start_ts)
         return start_price, live_price
     except Exception as e:
-        _note_pyth_failure("get_pyth_prices", f"{type(e).__name__}: {e}")
+        _note_spot_failure("get_spot_prices", f"{type(e).__name__}: {e}")
         return None, None
+
 
 def send_telegram_manipulation_alert(coin_symbol, anomaly_type, start_spot, live_spot, up_price, down_price, market_title, market_slug, remaining_seconds, condition_id=None, start_price_note=None, bar_label="5m"):
     try:
@@ -1994,14 +2028,13 @@ def scan_spot_manipulation_anomalies(bar_seconds=300, slug_tag="5m", coins=None)
                     _diag(slug, "window", f"pencere disi: remaining={remaining_seconds}s bar={bar_len}s (market span={market_span}s, beklenen {bar_seconds}s)")
                     continue
                     
-                feed_id = pyth_feed_ids.get(coin)
-                if not feed_id:
-                    _diag(slug, "no_feed", f"{coin} icin Pyth feed tanimli degil")
+                if coin not in spot_feeds:
+                    _diag(slug, "no_feed", f"{coin} icin Chainlink feed tanimli degil")
                     continue
                     
-                start_spot, live_spot = get_pyth_prices(feed_id, start_ts)
+                start_spot, live_spot = get_spot_prices(coin, start_ts)
                 if not start_spot or not live_spot:
-                    _diag(slug, "no_spot", f"Pyth fiyati alinamadi (start={start_spot}, live={live_spot}, son sebep: {_pyth_failure_note()})")
+                    _diag(slug, "no_spot", f"Fiyat alinamadi (strike={start_spot}, live={live_spot}, son sebep: {_spot_failure_note()})")
                     continue
                     
                 spot_diff = live_spot - start_spot
@@ -2143,6 +2176,11 @@ def scan_spot_manipulation_anomalies(bar_seconds=300, slug_tag="5m", coins=None)
                         # from the current level; if the drop stalls while spot stays
                         # adverse, the timer will run out and the alert still fires.
                         manipulation_divergence_start[key] = {"ts": now_ts, "price": favored_price}
+                    elif ((now_ts - state["ts"]) >= MANIPULATION_PERSIST_SECONDS
+                          and remaining_seconds > MANIPULATION_ALERT_WINDOW_SECONDS):
+                        # Picture confirmed, but the closing window has not opened yet -
+                        # keep the timer running so the alert fires the moment it does.
+                        _diag(slug, "waiting_window", f"divergence dogrulandi, kapanis penceresi bekleniyor (remaining={remaining_seconds}s)")
                     elif (now_ts - state["ts"]) >= MANIPULATION_PERSIST_SECONDS and key not in alerted_manipulation_events:
                         # Picture held continuously for MANIPULATION_PERSIST_SECONDS+ with a stubborn board -> ALERT
                         alerted_manipulation_events.add(key)
@@ -2157,7 +2195,7 @@ def scan_spot_manipulation_anomalies(bar_seconds=300, slug_tag="5m", coins=None)
                             market_slug=slug,
                             remaining_seconds=remaining_seconds,
                             condition_id=cond_id,
-                            start_price_note=pyth_start_price_meta.get((feed_id, start_ts)),
+                            start_price_note=spot_start_price_meta.get((coin, start_ts)),
                             bar_label=slug_tag
                         )
                 else:
@@ -2192,7 +2230,7 @@ def start_manipulation_15m_scanner():
     os.environ["MANIPULATION_15M_SCANNER_STARTED"] = "true"
     # Idempotent (own env guard): guarantees the shared tick sampler is up even if
     # the 5m scanner never started, without ever spawning a second sampler.
-    start_pyth_tick_sampler()
+    start_spot_tick_sampler()
     print("[INFO] Spawning background 15m Manipulation Scanner thread...", flush=True)
     m15_thread = threading.Thread(target=manipulation_15m_scanner_loop, daemon=True)
     m15_thread.start()
@@ -2201,7 +2239,7 @@ def start_manipulation_scanner():
     if os.environ.get("MANIPULATION_SCANNER_STARTED") == "true":
         return
     os.environ["MANIPULATION_SCANNER_STARTED"] = "true"
-    start_pyth_tick_sampler()
+    start_spot_tick_sampler()
     print("[INFO] Spawning background Manipulation Scanner thread...", flush=True)
     m_thread = threading.Thread(target=manipulation_scanner_loop, daemon=True)
     m_thread.start()
