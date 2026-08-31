@@ -1621,6 +1621,23 @@ pyth_tick_buffers = {fid: deque(maxlen=PYTH_TICK_BUFFER_LEN) for fid in pyth_fee
 # ("son saniye (Nsn sapma)" / "son saniye (Hermes fallback)"), for alerts + logs
 pyth_start_price_meta = {}
 
+# Hermes began answering 401 on 2026-08-26: the public endpoint now needs credentials.
+# Both the base URL and the auth header are env-configurable so switching to a key, a
+# self-hosted Hermes or an alternate provider is a Railway variable, not a code change.
+PYTH_HERMES_BASE = os.environ.get("PYTH_HERMES_BASE", "https://hermes.pyth.network").rstrip("/")
+
+def _pyth_headers():
+    # No key configured -> unauthenticated request, exactly as before.
+    key = os.environ.get("PYTH_API_KEY")
+    if not key:
+        return None
+    # Default to the usual bearer scheme; PYTH_AUTH_HEADER overrides the header name
+    # and sends the key verbatim (e.g. "x-api-key") for providers that want that.
+    header = os.environ.get("PYTH_AUTH_HEADER")
+    if header:
+        return {header: key}
+    return {"Authorization": f"Bearer {key}"}
+
 # Why the last Hermes call failed. All three Pyth call sites used to fail silently,
 # so a total outage and a quiet market looked identical in the logs.
 pyth_last_failure = {"where": None, "reason": None}
@@ -1638,7 +1655,7 @@ def _sample_pyth_ticks_once():
     # One sampler tick: a single multi-id Hermes request covering all feeds.
     # Returns True if the response yielded at least one usable price.
     ids_qs = "&".join(f"ids[]={fid}" for fid in pyth_feed_ids.values())
-    r = requests.get(f"https://hermes.pyth.network/v2/updates/price/latest?{ids_qs}", timeout=2)
+    r = requests.get(f"{PYTH_HERMES_BASE}/v2/updates/price/latest?{ids_qs}", timeout=2, headers=_pyth_headers())
     if r.status_code != 200:
         _note_pyth_failure("sampler", f"HTTP {r.status_code}: {str(r.text)[:120]}")
         return False
@@ -1701,8 +1718,8 @@ def start_pyth_tick_sampler():
 
 def _fetch_pyth_hist_price(feed_id, ts):
     # Single-point historical price at the bar boundary, used as fallback
-    hist_url = f"https://hermes.pyth.network/v2/updates/price/{ts}?ids[]={feed_id}"
-    r_hist = requests.get(hist_url, timeout=3)
+    hist_url = f"{PYTH_HERMES_BASE}/v2/updates/price/{ts}?ids[]={feed_id}"
+    r_hist = requests.get(hist_url, timeout=3, headers=_pyth_headers())
     if r_hist.status_code != 200:
         _note_pyth_failure("hist", f"HTTP {r_hist.status_code}: {str(r_hist.text)[:120]}")
         return None
@@ -1765,8 +1782,8 @@ def get_bar_open_price(feed_id, start_ts):
 
 def get_pyth_prices(feed_id, start_ts):
     try:
-        live_url = f"https://hermes.pyth.network/v2/updates/price/latest?ids[]={feed_id}"
-        r_live = requests.get(live_url, timeout=3)
+        live_url = f"{PYTH_HERMES_BASE}/v2/updates/price/latest?ids[]={feed_id}"
+        r_live = requests.get(live_url, timeout=3, headers=_pyth_headers())
         live_price = None
         if r_live.status_code == 200:
             parsed = r_live.json().get("parsed", [])
