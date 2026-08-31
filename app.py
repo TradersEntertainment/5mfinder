@@ -1545,12 +1545,14 @@ alerted_manipulation_events = set()
 
 # How long the divergence picture must hold CONTINUOUSLY before an alert fires.
 MANIPULATION_PERSIST_SECONDS = 25
-# Alerts are held until the final minute of the bar. That window is exactly the span the
-# closing 60s TWAP averages over, so it is the only stretch where pushing the board (or
-# the price) can still change the outcome - and a board still contradicting spot there is
-# manipulation rather than the TWAP's ~30s lag catching up. Detection and the persistence
-# timer run for the whole bar; only the notification waits.
-MANIPULATION_ALERT_WINDOW_SECONDS = 60
+# Alerts are held until the first minute of the bar has elapsed, then stay open for the
+# rest of it. Waiting for the CLOSE would be too late to be useful: the whale finishes
+# collecting orders off the book about a minute before the bar ends, and the closing 60s
+# TWAP is already being averaged by then - the value of the signal is the lead time. The
+# first minute is skipped for the opposite reason: the board has only just left its 50/50
+# open, so a skew read there is settling noise rather than a position. Detection and the
+# persistence timer run for the whole bar; only the notification waits.
+MANIPULATION_ALERT_MIN_ELAPSED_SECONDS = 60
 
 # Divergence persistence timers: "{slug}:{direction}" ->
 #   {"ts": when the divergence was first seen, "price": favored side price at that moment}
@@ -2177,10 +2179,11 @@ def scan_spot_manipulation_anomalies(bar_seconds=300, slug_tag="5m", coins=None)
                         # adverse, the timer will run out and the alert still fires.
                         manipulation_divergence_start[key] = {"ts": now_ts, "price": favored_price}
                     elif ((now_ts - state["ts"]) >= MANIPULATION_PERSIST_SECONDS
-                          and remaining_seconds > MANIPULATION_ALERT_WINDOW_SECONDS):
-                        # Picture confirmed, but the closing window has not opened yet -
-                        # keep the timer running so the alert fires the moment it does.
-                        _diag(slug, "waiting_window", f"divergence dogrulandi, kapanis penceresi bekleniyor (remaining={remaining_seconds}s)")
+                          and remaining_seconds > bar_len - MANIPULATION_ALERT_MIN_ELAPSED_SECONDS):
+                        # Picture confirmed inside the bar's first minute - hold the
+                        # notification but keep the timer, so it fires on the very scan
+                        # the window opens rather than restarting the 25s count there.
+                        _diag(slug, "waiting_window", f"divergence dogrulandi, ilk dakika bekleniyor (elapsed={bar_len - remaining_seconds}s)")
                     elif (now_ts - state["ts"]) >= MANIPULATION_PERSIST_SECONDS and key not in alerted_manipulation_events:
                         # Picture held continuously for MANIPULATION_PERSIST_SECONDS+ with a stubborn board -> ALERT
                         alerted_manipulation_events.add(key)
