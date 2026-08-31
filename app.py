@@ -1621,12 +1621,26 @@ pyth_tick_buffers = {fid: deque(maxlen=PYTH_TICK_BUFFER_LEN) for fid in pyth_fee
 # ("son saniye (Nsn sapma)" / "son saniye (Hermes fallback)"), for alerts + logs
 pyth_start_price_meta = {}
 
+# Why the last Hermes call failed. All three Pyth call sites used to fail silently,
+# so a total outage and a quiet market looked identical in the logs.
+pyth_last_failure = {"where": None, "reason": None}
+
+def _note_pyth_failure(where, reason):
+    pyth_last_failure["where"] = where
+    pyth_last_failure["reason"] = reason
+
+def _pyth_failure_note():
+    if not pyth_last_failure["reason"]:
+        return "sebep kaydedilmedi"
+    return f"{pyth_last_failure['where']} -> {pyth_last_failure['reason']}"
+
 def _sample_pyth_ticks_once():
     # One sampler tick: a single multi-id Hermes request covering all feeds.
     # Returns True if the response yielded at least one usable price.
     ids_qs = "&".join(f"ids[]={fid}" for fid in pyth_feed_ids.values())
     r = requests.get(f"https://hermes.pyth.network/v2/updates/price/latest?{ids_qs}", timeout=2)
     if r.status_code != 200:
+        _note_pyth_failure("sampler", f"HTTP {r.status_code}: {str(r.text)[:120]}")
         return False
     got_any = False
     for item in r.json().get("parsed", []):
@@ -1645,24 +1659,35 @@ def _sample_pyth_ticks_once():
                     buf.append((pub_ts, float(price)))
         except Exception:
             continue
+    if not got_any:
+        _note_pyth_failure("sampler", "HTTP 200 ama kullanilabilir fiyat yok")
     return got_any
 
 def pyth_tick_sampler_loop():
     print("[INFO] Background Pyth 1s Tick Sampler Thread Started (last-second source for bar-open strike).", flush=True)
     consecutive_failures = 0
+    connected_once = False
     while True:
         t0 = time.time()
         ok = False
         try:
             ok = _sample_pyth_ticks_once()
-        except Exception:
+        except Exception as e:
+            _note_pyth_failure("sampler", f"{type(e).__name__}: {e}")
             ok = False
         if ok:
+            if not connected_once:
+                connected_once = True
+                print("[PYTH SAMPLER] Hermes baglantisi kuruldu.", flush=True)
+            elif consecutive_failures:
+                print(f"[PYTH SAMPLER] baglanti geri geldi ({consecutive_failures} basarisiz tiktan sonra).", flush=True)
             consecutive_failures = 0
         else:
             consecutive_failures += 1
-            if consecutive_failures % 120 == 0:
-                print(f"[PYTH SAMPLER] {consecutive_failures} consecutive failed ticks (Hermes unreachable?)", flush=True)
+            # Report the FIRST failure at once - the old "every 120 ticks" rule hid the
+            # reason for two minutes - then thin out so a long outage can't flood the log.
+            if consecutive_failures == 1 or consecutive_failures % 300 == 0:
+                print(f"[PYTH SAMPLER] {consecutive_failures} ardisik basarisiz tik (son sebep: {_pyth_failure_note()})", flush=True)
         # Tick-aligned 1s cadence; 0.2s floor so a slow request can't busy-loop
         time.sleep(max(0.2, 1.0 - (time.time() - t0)))
 
@@ -1678,13 +1703,16 @@ def _fetch_pyth_hist_price(feed_id, ts):
     # Single-point historical price at the bar boundary, used as fallback
     hist_url = f"https://hermes.pyth.network/v2/updates/price/{ts}?ids[]={feed_id}"
     r_hist = requests.get(hist_url, timeout=3)
-    if r_hist.status_code == 200:
-        parsed = r_hist.json().get("parsed", [])
-        if parsed:
-            p_obj = parsed[0].get("price", {})
-            price = int(p_obj.get("price", 0)) * (10 ** int(p_obj.get("expo", 0)))
-            if price:
-                return price
+    if r_hist.status_code != 200:
+        _note_pyth_failure("hist", f"HTTP {r_hist.status_code}: {str(r_hist.text)[:120]}")
+        return None
+    parsed = r_hist.json().get("parsed", [])
+    if parsed:
+        p_obj = parsed[0].get("price", {})
+        price = int(p_obj.get("price", 0)) * (10 ** int(p_obj.get("expo", 0)))
+        if price:
+            return price
+    _note_pyth_failure("hist", "HTTP 200 ama parsed bos")
     return None
 
 def get_bar_open_price(feed_id, start_ts):
@@ -1723,7 +1751,8 @@ def get_bar_open_price(feed_id, start_ts):
     if start_price is None:
         try:
             start_price = _fetch_pyth_hist_price(feed_id, start_ts)
-        except Exception:
+        except Exception as e:
+            _note_pyth_failure("hist", f"{type(e).__name__}: {e}")
             start_price = None
         if start_price:
             note = "son saniye (Hermes fallback)"
@@ -1744,13 +1773,18 @@ def get_pyth_prices(feed_id, start_ts):
             if parsed:
                 p_obj = parsed[0].get("price", {})
                 live_price = int(p_obj.get("price", 0)) * (10 ** int(p_obj.get("expo", 0)))
+            else:
+                _note_pyth_failure("live", "HTTP 200 ama parsed bos")
+        else:
+            _note_pyth_failure("live", f"HTTP {r_live.status_code}: {str(r_live.text)[:120]}")
                 
         # Bar-open price: the previous bar's last-second tick via the tick sampler,
         # cached once per bar; falls back to the single historical tick when unavailable
         start_price = get_bar_open_price(feed_id, start_ts)
 
         return start_price, live_price
-    except Exception:
+    except Exception as e:
+        _note_pyth_failure("get_pyth_prices", f"{type(e).__name__}: {e}")
         return None, None
 
 def send_telegram_manipulation_alert(coin_symbol, anomaly_type, start_spot, live_spot, up_price, down_price, market_title, market_slug, remaining_seconds, condition_id=None, start_price_note=None, bar_label="5m"):
@@ -1919,25 +1953,28 @@ def scan_spot_manipulation_anomalies(bar_seconds=300, slug_tag="5m", coins=None)
                     continue
                     
                 end_ts = int(parser.isoparse(end_date_str).timestamp())
-                # Trust the market's own span over our configured bar length: if Polymarket
-                # changes the duration behind a slug, hardcoding it would push every scan
-                # outside the window below and silently kill the scanner.
+                # The slug tag is the authority on bar length: '-5m-' means 300s. Gamma's
+                # startDate is the market's LISTING time - observed ~86213s (a day) before
+                # endDate - not the bar open, so it cannot be used to infer the duration;
+                # deriving from it put start_ts a day in the past and disabled this
+                # window's upper bound. Measure it anyway and report it in the diagnostic
+                # below, so if Polymarket really does change the bar we SEE it instead of
+                # silently adopting a wrong value.
                 bar_len = bar_seconds
+                market_span = None
                 start_date_str = market.get("startDate")
                 if start_date_str:
                     try:
-                        gamma_start = int(parser.isoparse(start_date_str).timestamp())
-                        if 0 < end_ts - gamma_start <= 86400:
-                            bar_len = end_ts - gamma_start
+                        market_span = end_ts - int(parser.isoparse(start_date_str).timestamp())
                     except Exception:
-                        pass
+                        market_span = None
                 start_ts = end_ts - bar_len
                 remaining_seconds = end_ts - now_ts
 
                 # Rule 1: scan almost the whole bar - skip only the first and last 15s
                 # (unpriced book right after open, settlement right before close).
                 if remaining_seconds < 15 or remaining_seconds > bar_len - 15:
-                    _diag(slug, "window", f"pencere disi: remaining={remaining_seconds}s bar={bar_len}s (beklenen {bar_seconds}s)")
+                    _diag(slug, "window", f"pencere disi: remaining={remaining_seconds}s bar={bar_len}s (market span={market_span}s, beklenen {bar_seconds}s)")
                     continue
                     
                 feed_id = pyth_feed_ids.get(coin)
@@ -1947,7 +1984,7 @@ def scan_spot_manipulation_anomalies(bar_seconds=300, slug_tag="5m", coins=None)
                     
                 start_spot, live_spot = get_pyth_prices(feed_id, start_ts)
                 if not start_spot or not live_spot:
-                    _diag(slug, "no_spot", f"Pyth fiyati alinamadi (start={start_spot}, live={live_spot})")
+                    _diag(slug, "no_spot", f"Pyth fiyati alinamadi (start={start_spot}, live={live_spot}, son sebep: {_pyth_failure_note()})")
                     continue
                     
                 spot_diff = live_spot - start_spot
