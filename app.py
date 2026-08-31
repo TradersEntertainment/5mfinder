@@ -1554,6 +1554,21 @@ manipulation_divergence_start = {}
 # The start price of a 5m interval never changes, so fetch it once per market.
 pyth_start_price_cache = {}
 
+# slug -> last diagnostic reason code printed for it, so the 5s loop reports a
+# skip once instead of ~50 times per bar. The reason code is stable while the
+# numbers in the message are not, so a genuine change of cause still prints.
+manipulation_diag_logged = {}
+# slug_tag -> last bar timestamp we logged a heartbeat for
+manipulation_heartbeat_logged = {}
+
+def _diag(slug, code, msg):
+    # Every skip on the scan path used to be a silent `continue`, which is why a
+    # total outage looked identical to a quiet market in the logs. Name the gate.
+    if manipulation_diag_logged.get(slug) == code:
+        return
+    manipulation_diag_logged[slug] = code
+    print(f"[MANIPULATION DIAG] {slug}: {msg}", flush=True)
+
 def _reset_manipulation_divergence(slug, keep_direction=None):
     for d in ("UP", "DOWN"):
         if d != keep_direction:
@@ -1575,6 +1590,8 @@ def _prune_manipulation_state(now_ts):
         pyth_start_price_cache.pop(k, None)
     for k in [k for k in pyth_start_price_meta if k[1] < cutoff]:
         pyth_start_price_meta.pop(k, None)
+    for k in [k for k in manipulation_diag_logged if _is_old(k)]:
+        manipulation_diag_logged.pop(k, None)
 
 pyth_feed_ids = {
     "btc": "e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43",
@@ -1592,7 +1609,7 @@ pyth_feed_to_coin = {fid: coin for coin, fid in pyth_feed_ids.items()}
 # live tick at or before the bar boundary, so the scan loop never blocks on HTTP to
 # price a bar open. No averaging, no high/low - one point, like the original system.
 PYTH_CLOSE_MAX_AGE_SECONDS = 5  # boundary tick may lag bar open by at most 5s
-PYTH_TICK_BUFFER_LEN = 500      # <=1 tick per oracle second -> >=500s retention (scan needs ~290s)
+PYTH_TICK_BUFFER_LEN = 1000     # <=1 tick per oracle second -> >=1000s retention (15m bar needs ~890s)
 
 # feed_id -> deque[(publish_time, price)], appended by the sampler thread only.
 # Pre-created for every known feed so the dict itself is never mutated cross-thread;
@@ -1736,10 +1753,19 @@ def get_pyth_prices(feed_id, start_ts):
     except Exception:
         return None, None
 
-def send_telegram_manipulation_alert(coin_symbol, anomaly_type, start_spot, live_spot, up_price, down_price, market_title, market_slug, remaining_seconds, condition_id=None, start_price_note=None):
+def send_telegram_manipulation_alert(coin_symbol, anomaly_type, start_spot, live_spot, up_price, down_price, market_title, market_slug, remaining_seconds, condition_id=None, start_price_note=None, bar_label="5m"):
     try:
-        BOT_TOKEN = os.environ.get("MANIPULATION_TELEGRAM_BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN")
-        CHAT_ID = os.environ.get("MANIPULATION_TELEGRAM_CHAT_ID") or os.environ.get("MANIPULATION_CHAT_ID") or os.environ.get("TELEGRAM_CHAT_ID")
+        # Non-5m bars get their own group; each lookup falls back to the shared
+        # manipulation channel and then the global one, so a missing env var
+        # degrades to "wrong group" instead of "no alert at all".
+        env_pfx = "" if bar_label == "5m" else f"{bar_label.upper()}_"
+        BOT_TOKEN = (os.environ.get(f"MANIPULATION_{env_pfx}TELEGRAM_BOT_TOKEN")
+                     or os.environ.get("MANIPULATION_TELEGRAM_BOT_TOKEN")
+                     or os.environ.get("TELEGRAM_BOT_TOKEN"))
+        CHAT_ID = (os.environ.get(f"MANIPULATION_{env_pfx}TELEGRAM_CHAT_ID")
+                   or os.environ.get("MANIPULATION_TELEGRAM_CHAT_ID")
+                   or os.environ.get("MANIPULATION_CHAT_ID")
+                   or os.environ.get("TELEGRAM_CHAT_ID"))
         
         if not BOT_TOKEN or not CHAT_ID:
             print("[WARNING] Manipulation Telegram Bot Token or Chat ID not set. Skipping notification.", flush=True)
@@ -1803,7 +1829,7 @@ def send_telegram_manipulation_alert(coin_symbol, anomaly_type, start_spot, live
                 print(f"[MANIPULATION HOLDERS ERROR] {ex}", flush=True)
 
         favored_price_cents = int(round(up_price * 100)) if favored_dir == "UP" else int(round(down_price * 100))
-        push_summary = f"{type_emoji} <b>[{coin_symbol} {favored_dir} MANİPÜLASYON]</b> Spot: {spot_status_str} (${spot_diff:+.2f}) | {favored_dir}: {favored_price_cents}¢ ({rem_min}dk {rem_sec}sn)"
+        push_summary = f"{type_emoji} <b>[{coin_symbol} {bar_label} {favored_dir} MANİPÜLASYON]</b> Spot: {spot_status_str} (${spot_diff:+.2f}) | {favored_dir}: {favored_price_cents}¢ ({rem_min}dk {rem_sec}sn)"
         strike_note = f" <i>({start_price_note})</i>" if start_price_note else ""
 
         text = (
@@ -1846,25 +1872,36 @@ def send_telegram_manipulation_alert(coin_symbol, anomaly_type, start_spot, live
     except Exception as e:
         print(f"[ERROR] Failed to send Manipulation TG alert: {e}", flush=True)
 
-def scan_spot_manipulation_anomalies():
+def scan_spot_manipulation_anomalies(bar_seconds=300, slug_tag="5m", coins=None):
+    # One implementation for every bar length: the 5m and 15m scanners differ only in
+    # bar_seconds/slug_tag, so a fix or a threshold change lands on both at once.
     try:
         now_ts = int(time.time())
-        current_interval = (now_ts // 300) * 300
+        current_interval = (now_ts // bar_seconds) * bar_seconds
 
         _prune_manipulation_state(now_ts)
 
-        coins = ["btc"]
+        if coins is None:
+            coins = ["btc"]
+
+        # Heartbeat, one line per bar: distinguishes "scanner is dead" from
+        # "scanner is alive but every market got filtered out" in the logs.
+        if manipulation_heartbeat_logged.get(slug_tag) != current_interval:
+            manipulation_heartbeat_logged[slug_tag] = current_interval
+            print(f"[MANIPULATION {slug_tag}] bar {current_interval} taraniyor (coins={','.join(coins)})", flush=True)
 
         for coin in coins:
-            slug = f"{coin}-updown-5m-{current_interval}"
+            slug = f"{coin}-updown-{slug_tag}-{current_interval}"
             # _t cache-buster forces a fresh (non-CDN-cached) Gamma response each scan
             url = f"https://gamma-api.polymarket.com/markets?slug={slug}&_t={now_ts}"
             try:
                 r = requests.get(url, timeout=4)
                 if r.status_code != 200:
+                    _diag(slug, "http", f"Gamma HTTP {r.status_code}")
                     continue
                 data = r.json()
                 if not data or not isinstance(data, list):
+                    _diag(slug, "no_market", "Gamma bu slug icin market dondurmedi")
                     continue
                 market = data[0]
                 cond_id = market.get("conditionId")
@@ -1878,22 +1915,39 @@ def scan_spot_manipulation_anomalies():
                         clob_ids = []
                         
                 if len(clob_ids) < 2 or not end_date_str:
+                    _diag(slug, "no_clob", f"clobTokenIds={len(clob_ids)} endDate={end_date_str!r}")
                     continue
                     
                 end_ts = int(parser.isoparse(end_date_str).timestamp())
-                start_ts = end_ts - 300
+                # Trust the market's own span over our configured bar length: if Polymarket
+                # changes the duration behind a slug, hardcoding it would push every scan
+                # outside the window below and silently kill the scanner.
+                bar_len = bar_seconds
+                start_date_str = market.get("startDate")
+                if start_date_str:
+                    try:
+                        gamma_start = int(parser.isoparse(start_date_str).timestamp())
+                        if 0 < end_ts - gamma_start <= 86400:
+                            bar_len = end_ts - gamma_start
+                    except Exception:
+                        pass
+                start_ts = end_ts - bar_len
                 remaining_seconds = end_ts - now_ts
-                
-                # Rule 1: Scan almost full 5m duration (15s to 285s remaining) - only ignore final 15s settlement
-                if remaining_seconds < 15 or remaining_seconds > 285:
+
+                # Rule 1: scan almost the whole bar - skip only the first and last 15s
+                # (unpriced book right after open, settlement right before close).
+                if remaining_seconds < 15 or remaining_seconds > bar_len - 15:
+                    _diag(slug, "window", f"pencere disi: remaining={remaining_seconds}s bar={bar_len}s (beklenen {bar_seconds}s)")
                     continue
                     
                 feed_id = pyth_feed_ids.get(coin)
                 if not feed_id:
+                    _diag(slug, "no_feed", f"{coin} icin Pyth feed tanimli degil")
                     continue
                     
                 start_spot, live_spot = get_pyth_prices(feed_id, start_ts)
                 if not start_spot or not live_spot:
+                    _diag(slug, "no_spot", f"Pyth fiyati alinamadi (start={start_spot}, live={live_spot})")
                     continue
                     
                 spot_diff = live_spot - start_spot
@@ -1905,18 +1959,22 @@ def scan_spot_manipulation_anomalies():
                 # and a smaller but still meaningful move near settlement.
                 base_min_diffs = {"btc": 6.0, "eth": 0.40, "sol": 0.08, "bnb": 0.25, "xrp": 0.003}
                 base_min = base_min_diffs.get(coin.lower(), 0.10)
-                if remaining_seconds > 240:
+                # Expressed as a fraction of the bar so the same curve applies to any bar
+                # length (for a 300s bar these are the original 240/180/120/60 cutoffs).
+                frac_left = remaining_seconds / float(bar_len) if bar_len else 0.0
+                if frac_left > 0.8:
                     time_scale = 5.0
-                elif remaining_seconds > 180:
+                elif frac_left > 0.6:
                     time_scale = 3.5
-                elif remaining_seconds > 120:
+                elif frac_left > 0.4:
                     time_scale = 2.5
-                elif remaining_seconds > 60:
+                elif frac_left > 0.2:
                     time_scale = 1.5
                 else:
                     time_scale = 1.0
                 required_min_diff = base_min * time_scale
                 if abs(spot_diff) < required_min_diff:
+                    _diag(slug, "threshold", f"esik alti: gerekli ${required_min_diff:.2f} (x{time_scale})")
                     _reset_manipulation_divergence(slug)
                     continue
                     
@@ -1985,11 +2043,13 @@ def scan_spot_manipulation_anomalies():
                 if up_price is None or down_price is None:
                     # No trustworthy board price this scan - a divergence can't be
                     # confirmed as "holding" through a blind window, so restart the timer
+                    _diag(slug, "no_board", "tahta okunamadi (CLOB kitabi ve Gamma outcomePrices)")
                     _reset_manipulation_divergence(slug)
                     continue
                 
                 # Rule 3: Skip extreme/resolved markets (one side already at 97%+ means no manipulation, market is decided)
                 if up_price >= 0.97 or down_price >= 0.97 or up_price <= 0.03 or down_price <= 0.03:
+                    _diag(slug, "decided", f"market kararlasmis (UP={up_price:.2f} DOWN={down_price:.2f})")
                     _reset_manipulation_divergence(slug)
                     continue
                         
@@ -2043,9 +2103,11 @@ def scan_spot_manipulation_anomalies():
                             market_slug=slug,
                             remaining_seconds=remaining_seconds,
                             condition_id=cond_id,
-                            start_price_note=pyth_start_price_meta.get((feed_id, start_ts))
+                            start_price_note=pyth_start_price_meta.get((feed_id, start_ts)),
+                            bar_label=slug_tag
                         )
                 else:
+                    _diag(slug, "no_anomaly", "anomali yok (tahta spot ile uyumlu)")
                     _reset_manipulation_divergence(slug)
             except Exception as e:
                 print(f"[MANIPULATION SCANNER ERROR] Error checking {slug}: {e}", flush=True)
@@ -2053,13 +2115,33 @@ def scan_spot_manipulation_anomalies():
         print(f"[MANIPULATION SCANNER ERROR] Top-level error: {e}", flush=True)
 
 def manipulation_scanner_loop():
-    print("[INFO] Background Manipulation & Spot-Divergence Scanner Thread Started (5s High Speed Cycle).", flush=True)
+    print("[INFO] Background Manipulation & Spot-Divergence Scanner Thread Started (5m bars, 5s High Speed Cycle).", flush=True)
     while True:
         try:
-            scan_spot_manipulation_anomalies()
+            scan_spot_manipulation_anomalies(bar_seconds=300, slug_tag="5m", coins=["btc"])
         except Exception as e:
             print(f"[MANIPULATION SCANNER ERROR] Loop exception: {e}", flush=True)
         time.sleep(5)
+
+def manipulation_15m_scanner_loop():
+    print("[INFO] Background Manipulation Scanner Thread Started (15m bars, 5s High Speed Cycle).", flush=True)
+    while True:
+        try:
+            scan_spot_manipulation_anomalies(bar_seconds=900, slug_tag="15m", coins=["btc"])
+        except Exception as e:
+            print(f"[MANIPULATION 15M SCANNER ERROR] Loop exception: {e}", flush=True)
+        time.sleep(5)
+
+def start_manipulation_15m_scanner():
+    if os.environ.get("MANIPULATION_15M_SCANNER_STARTED") == "true":
+        return
+    os.environ["MANIPULATION_15M_SCANNER_STARTED"] = "true"
+    # Idempotent (own env guard): guarantees the shared tick sampler is up even if
+    # the 5m scanner never started, without ever spawning a second sampler.
+    start_pyth_tick_sampler()
+    print("[INFO] Spawning background 15m Manipulation Scanner thread...", flush=True)
+    m15_thread = threading.Thread(target=manipulation_15m_scanner_loop, daemon=True)
+    m15_thread.start()
 
 def start_manipulation_scanner():
     if os.environ.get("MANIPULATION_SCANNER_STARTED") == "true":
@@ -2080,6 +2162,7 @@ def start_whale_scanner():
     start_bnb_whale_scanner()
     start_btc_orderbook_scanner()
     start_manipulation_scanner()
+    start_manipulation_15m_scanner()
 
 # Start thread reliably when running in main app or when running under Gunicorn (which sets PORT environment variable)
 if __name__ == "__main__" or "PORT" in os.environ:
